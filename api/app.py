@@ -10,6 +10,7 @@ app = FastAPI()
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-4")  # Default to grok-4
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 
 # Initialize Application globally
@@ -40,23 +41,25 @@ async def handle_message(update, context):
     except Exception as e:
         return f"Error sending response: {str(e)}"
 
-# Function to call Grok API
+# Function to call Grok API with enhanced error handling
 async def call_grok_api(message):
     if not GROK_API_KEY:
         return "Error: GROK_API_KEY is not set"
+    if not GROK_MODEL:
+        return "Error: GROK_MODEL is not set"
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
                 GROK_API_URL,
                 json={
-                    "model": "grok-4",  # Adjust if model name differs
+                    "model": GROK_MODEL,
                     "messages": [{"role": "user", "content": message}]
                 },
                 headers={
                     "Authorization": f"Bearer {GROK_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                timeout=8.0  # Reduced timeout for Vercel free tier
+                timeout=8.0
             )
             response.raise_for_status()
             data = response.json()
@@ -64,17 +67,19 @@ async def call_grok_api(message):
                 return "Error: No choices in Grok API response"
             return data["choices"][0].get("message", {}).get("content", "No response content")
         except httpx.HTTPStatusError as e:
-            return f"Error: HTTP {e.response.status_code}: {e.response.text}"
+            error_message = f"HTTP {e.response.status_code}: {e.response.text}"
+            return f"Error: {error_message}"
         except httpx.RequestError as e:
-            return f"Error: Network error: {str(e)}"
+            error_message = f"Network error: {type(e).__name__} - {str(e)}"
+            return f"Error: {error_message}"
         except Exception as e:
-            return f"Error: {str(e)}"
+            error_message = f"Unexpected error: {type(e).__name__} - {str(e)}"
+            return f"Error: {error_message}"
 
 # Webhook endpoint
 @app.post("/")
 async def telegram_webhook(request: Request):
     try:
-        # Ensure application is initialized
         if application is None or not application.initialized:
             await initialize_application()
         update = Update.de_json(await request.json(), application.bot)
@@ -84,9 +89,3 @@ async def telegram_webhook(request: Request):
         return {"ok": True}
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
-
-# Shutdown handling
-@app.on_event("shutdown")
-async def shutdown():
-    if application and application.initialized:
-        await application.stop()
