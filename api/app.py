@@ -17,7 +17,7 @@ application = None
 
 async def initialize_application():
     global application
-    if application is None:
+    if application is None or not application.initialized:
         if not TOKEN:
             raise ValueError("TELEGRAM_TOKEN is not set")
         application = Application.builder().token(TOKEN).build()
@@ -35,7 +35,10 @@ async def handle_message(update, context):
         return
     user_message = update.message.text
     grok_response = await call_grok_api(user_message)
-    await update.message.reply_text(grok_response)
+    try:
+        await update.message.reply_text(grok_response)
+    except Exception as e:
+        return f"Error sending response: {str(e)}"
 
 # Function to call Grok API
 async def call_grok_api(message):
@@ -53,7 +56,7 @@ async def call_grok_api(message):
                     "Authorization": f"Bearer {GROK_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                timeout=3600
+                timeout=8.0  # Reduced timeout for Vercel free tier
             )
             response.raise_for_status()
             data = response.json()
@@ -71,6 +74,7 @@ async def call_grok_api(message):
 @app.post("/")
 async def telegram_webhook(request: Request):
     try:
+        # Ensure application is initialized
         if application is None or not application.initialized:
             await initialize_application()
         update = Update.de_json(await request.json(), application.bot)
