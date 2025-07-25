@@ -3,6 +3,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters
 import httpx
 import os
+import asyncio
 
 app = FastAPI()
 
@@ -15,46 +16,48 @@ GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 # Initialize Application globally
 application = None
 
-def initialize_application():
+async def initialize_application():
     global application
     if application is None or not application.initialized:
         if not TOKEN:
+            print("Error: TELEGRAM_TOKEN is not set")  # Temporary
             raise ValueError("TELEGRAM_TOKEN is not set")
         application = Application.builder().token(TOKEN).build()
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.initialize()
+        await application.initialize()
+        print("Application initialized")  # Temporary
 
 # Call initialization at startup
 @app.on_event("startup")
-def startup():
-    initialize_application()
+async def startup():
+    await initialize_application()
 
 # Define the message handler to call Grok API
-def handle_message(update, context):
+async def handle_message(update, context):
     if not update.message or not update.message.text:
         print("No message or text in update")  # Temporary
         return
     print(f"Processing message: {update.message.text}")  # Temporary
     user_message = update.message.text
-    grok_response = call_grok_api(user_message)
+    grok_response = await call_grok_api(user_message)
     try:
-        update.message.reply_text(grok_response)
+        await update.message.reply_text(grok_response)
         print(f"Sent response: {grok_response}")  # Temporary
     except Exception as e:
         print(f"Error sending response: {str(e)}")  # Temporary
         return f"Error sending response: {str(e)}"
 
 # Function to call Grok API
-def call_grok_api(message):
+async def call_grok_api(message):
     if not GROK_API_KEY:
         print("Error: GROK_API_KEY is not set")  # Temporary
         return "Error: GROK_API_KEY is not set"
     if not GROK_MODEL:
         print("Error: GROK_MODEL is not set")  # Temporary
         return "Error: GROK_MODEL is not set"
-    with httpx.Client() as client:
+    async with httpx.AsyncClient() as client:
         try:
-            response = client.post(
+            response = await client.post(
                 GROK_API_URL,
                 json={
                     "model": GROK_MODEL,
@@ -64,7 +67,7 @@ def call_grok_api(message):
                     "Authorization": f"Bearer {GROK_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                timeout=8.0
+                timeout=9.0  # Increased to avoid timeout issues
             )
             response.raise_for_status()
             data = response.json()
@@ -77,26 +80,27 @@ def call_grok_api(message):
             print(f"HTTP error: {error_message}")  # Temporary
             return f"Error: {error_message}"
         except httpx.RequestError as e:
-            error_message = f"Network error: {type(e).__name__} - {str(e)}"
+            error_message = f"Network error: {type(e).__name__}: {str(e)}"
             print(f"Network error: {error_message}")  # Temporary
             return f"Error: {error_message}"
         except Exception as e:
-            error_message = f"Unexpected error: {type(e).__name__} - {str(e)}"
+            error_message = f"Unexpected error: {type(e).__name__}: {str(e)}"
             print(f"Unexpected error: {error_message}")  # Temporary
             return f"Error: {error_message}"
 
 # Webhook endpoint
 @app.post("/")
-def telegram_webhook(request: Request):
+async def telegram_webhook(request: Request):
     try:
         if application is None or not application.initialized:
-            print("Reinitializing application")  # Temporary
-            initialize_application()
-        update = Update.de_json(request.json, application.bot)
+            print("Re-initializing application")  # Temporary
+            await initialize_application()
+        update = Update.de_json(await request.json(), application.bot)
         if not update:
             print("Invalid update received")  # Temporary
             return {"ok": False, "error": "Invalid update"}, 400
-        application.process_update(update)
+        await application.process_update(update)
+        print("Update processed successfully")  # Temporary
         return {"ok": True}
     except Exception as e:
         print(f"Webhook error: {str(e)}")  # Temporary
