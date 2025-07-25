@@ -13,24 +13,15 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-4")  # Default to grok-4
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 
-# Initialize Application globally
-application = None
-
 async def initialize_application():
-    global application
-    if application is None or not application.initialized:
-        if not TOKEN:
-            print("Error: TELEGRAM_TOKEN is not set")  # Temporary
-            raise ValueError("TELEGRAM_TOKEN is not set")
-        application = Application.builder().token(TOKEN).build()
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        await application.initialize()
-        print("Application initialized")  # Temporary
-
-# Call initialization at startup
-@app.on_event("startup")
-async def startup():
-    await initialize_application()
+    if not TOKEN:
+        print("Error: TELEGRAM_TOKEN is not set")  # Temporary
+        raise ValueError("TELEGRAM_TOKEN is not set")
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    await application.initialize()
+    print("Application initialized")  # Temporary
+    return application
 
 # Define the message handler to call Grok API
 async def handle_message(update, context):
@@ -67,7 +58,7 @@ async def call_grok_api(message):
                     "Authorization": f"Bearer {GROK_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                timeout=9.0  # Increased to avoid timeout issues
+                timeout=9.0
             )
             response.raise_for_status()
             data = response.json()
@@ -92,9 +83,7 @@ async def call_grok_api(message):
 @app.post("/")
 async def telegram_webhook(request: Request):
     try:
-        if application is None or not application.initialized:
-            print("Re-initializing application")  # Temporary
-            await initialize_application()
+        application = await initialize_application()
         update = Update.de_json(await request.json(), application.bot)
         if not update:
             print("Invalid update received")  # Temporary
