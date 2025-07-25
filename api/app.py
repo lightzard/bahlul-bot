@@ -32,11 +32,16 @@ async def initialize_bot():
         .build()
     )
     
+    # Initialize the application
+    logger.info("Initializing Telegram application")
+    await telegram_app.initialize()
+    
     # Add handlers
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot initialized")
+    logger.info("Bot handlers added")
+        
     return telegram_app
 
 # Command handler for /start
@@ -120,3 +125,12 @@ async def telegram_webhook(request: Request):
 async def startup():
     global telegram_app
     telegram_app = await initialize_bot()
+
+# Shutdown event to clean up
+@app.on_event("shutdown")
+async def shutdown():
+    global telegram_app
+    if telegram_app is not None:
+        logger.info("Shutting down Telegram application")
+        await telegram_app.shutdown()
+        logger.info("Telegram application shut down successfully")
