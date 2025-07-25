@@ -29,10 +29,10 @@ async def initialize_bot():
     
     # Define message handler
     @bot.message_handler(content_types=['text'])
-    async def handle_message(message):
+    def handle_message(message):
         logger.info(f"Processing message: {message.text}")
         loop = asyncio.get_event_loop()
-        grok_response = await loop.run_until_complete(call_grok_api(message.text))
+        grok_response = loop.run_until_complete(call_grok_api(message.text))
         try:
             bot.reply_to(message, grok_response)
             logger.info(f"Sent response: {grok_response}")
@@ -63,7 +63,7 @@ async def call_grok_api(message):
                     "Authorization": f"Bearer {GROK_API_KEY}",
                     "Content-Type": "application/json"
                 },
-                timeout=9.0
+                timeout=60
             )
             response.raise_for_status()
             data = response.json()
