@@ -32,7 +32,9 @@ async def initialize_bot():
     def handle_message(message):
         logger.info(f"Processing message: {message.text}")
         loop = asyncio.get_event_loop()
+        logger.info("got the loop")
         grok_response = loop.run_until_complete(call_grok_api(message.text))
+        logger.info(f"got the response= {grok_response}")
         try:
             bot.reply_to(message, grok_response)
             logger.info(f"Sent response: {grok_response}")
