@@ -46,9 +46,9 @@ async def initialize_bot():
 
     logger.info("Bot initialized")
     logger.info(f"Removing existing webhook")
-    await bot.remove_webhook()
+    bot.remove_webhook()  # Synchronous call, no await needed
     logger.info(f"Setting webhook to {WEBHOOK_URL}")
-    await bot.set_webhook(url=WEBHOOK_URL)
+    bot.set_webhook(url=WEBHOOK_URL)  # Synchronous call, no await needed
     logger.info("Webhook set successfully")
     return bot
 
