@@ -11,7 +11,7 @@ app = FastAPI()
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-4")  # Default to grok-4
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast") 
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 
 # Configure logging
@@ -27,6 +27,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Message handler for text messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = update.message.text
+    if message_text[0]=='@' and len(message_text)>11:
+        message_text=message_text[11:] #skip @bahlulbot<space>
     logger.info(f"Processing message: {message_text}")
     try:
         grok_response = await call_grok_api(message_text)
