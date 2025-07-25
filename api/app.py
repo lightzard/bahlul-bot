@@ -4,6 +4,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import httpx
 import os
 import logging
+import asyncio
 
 app = FastAPI()
 
@@ -16,33 +17,6 @@ GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Initialize Telegram bot application
-telegram_app = None
-
-async def initialize_bot():
-    global telegram_app
-    if not TOKEN:
-        logger.error("TELEGRAM_TOKEN is not set")
-        raise ValueError("TELEGRAM_TOKEN is not set")
-    
-    telegram_app = (
-        Application.builder()
-        .token(TOKEN)
-        .build()
-    )
-    
-    # Initialize the application
-    logger.info("Initializing Telegram application")
-    await telegram_app.initialize()
-    
-    # Add handlers
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("Bot handlers added")
-        
-    return telegram_app
 
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,32 +79,52 @@ async def call_grok_api(message):
             logger.error(f"Unexpected error: {error_message}")
             return f"Error: {error_message}"
 
+# Initialize bot for each request
+async def initialize_bot():
+    if not TOKEN:
+        logger.error("TELEGRAM_TOKEN is not set")
+        raise ValueError("TELEGRAM_TOKEN is not set")
+    
+    telegram_app = (
+        Application.builder()
+        .token(TOKEN)
+        .build()
+    )
+    
+    # Initialize the application
+    logger.info("Initializing Telegram application")
+    await telegram_app.initialize()
+    
+    # Add handlers
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    logger.info("Bot handlers added")
+    return telegram_app
+
 # Webhook endpoint
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     try:
-        global telegram_app
-        if telegram_app is None:
-            telegram_app = await initialize_bot()
+        # Initialize a new Application for each request
+        telegram_app = await initialize_bot()
         update = Update.de_json(await request.json(), telegram_app.bot)
         await telegram_app.process_update(update)
         logger.info("Update processed successfully")
+        
+        # Shut down the application to clean up resources
+        await telegram_app.shutdown()
         return Response(status_code=200)
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
         return Response(content=f"Error: {str(e)}", status_code=500)
 
-# Startup event
+# Startup event (optional, for logging or other initialization)
 @app.on_event("startup")
 async def startup():
-    global telegram_app
-    telegram_app = await initialize_bot()
+    logger.info("Application startup")
 
-# Shutdown event to clean up
+# Shutdown event (optional, for logging)
 @app.on_event("shutdown")
 async def shutdown():
-    global telegram_app
-    if telegram_app is not None:
-        logger.info("Shutting down Telegram application")
-        await telegram_app.shutdown()
-        logger.info("Telegram application shut down successfully")
+    logger.info("Application shutdown")
