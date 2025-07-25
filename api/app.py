@@ -12,7 +12,6 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-4")  # Default to grok-4
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Webhook URL as environment variable
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,9 +25,6 @@ async def initialize_bot():
     if not TOKEN:
         logger.error("TELEGRAM_TOKEN is not set")
         raise ValueError("TELEGRAM_TOKEN is not set")
-    if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL is not set")
-        raise ValueError("WEBHOOK_URL is not set")
     bot = telebot.TeleBot(TOKEN)
     
     # Define message handler
@@ -45,11 +41,6 @@ async def initialize_bot():
             return f"Error sending response: {str(e)}"
 
     logger.info("Bot initialized")
-    logger.info(f"Removing existing webhook")
-    bot.remove_webhook()  # Synchronous call, no await needed
-    logger.info(f"Setting webhook to {WEBHOOK_URL}")
-    bot.set_webhook(url=WEBHOOK_URL)  # Synchronous call, no await needed
-    logger.info("Webhook set successfully")
     return bot
 
 # Function to call Grok API
@@ -98,7 +89,8 @@ async def call_grok_api(message):
 async def telegram_webhook(request: Request):
     try:
         global bot
-        bot = await initialize_bot()
+        if bot is None:
+            bot = await initialize_bot()
         update = await request.json()
         bot.process_new_updates([telebot.types.Update.de_json(update)])
         logger.info("Update processed successfully")
