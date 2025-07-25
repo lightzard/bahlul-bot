@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Request
-import telebot
+from fastapi import FastAPI, Request, Response
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import httpx
 import os
-import asyncio
 import logging
 
 app = FastAPI()
@@ -17,41 +17,55 @@ GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize bot
-bot = None
+# Initialize Telegram bot application
+telegram_app = None
 
 async def initialize_bot():
-    global bot
+    global telegram_app
     if not TOKEN:
-        logger.info("TELEGRAM_TOKEN is not set")
+        logger.error("TELEGRAM_TOKEN is not set")
         raise ValueError("TELEGRAM_TOKEN is not set")
-    bot = telebot.TeleBot(TOKEN)
     
-    # Define message handler
-    @bot.message_handler(content_types=['text'])
-    def handle_message(message):
-        logger.info(f"Processing message: {message.text}")
-        loop = asyncio.get_event_loop()
-        logger.info("got the loop")
-        grok_response = loop.run_until_complete(call_grok_api(message.text))
-        logger.info(f"got the response= {grok_response}")
-        try:
-            bot.reply_to(message, grok_response)
-            logger.info(f"Sent response: {grok_response}")
-        except Exception as e:
-            logger.info(f"Error sending response: {str(e)}")
-            return f"Error sending response: {str(e)}"
-
+    telegram_app = (
+        Application.builder()
+        .token(TOKEN)
+        .build()
+    )
+    
+    # Add handlers
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     logger.info("Bot initialized")
-    return bot
+    return telegram_app
+
+# Command handler for /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Received /start command")
+    await update.message.reply_text("Hello! I'm a bot powered by Grok. Send me a message, and I'll respond with Grok's answer.")
+    logger.info("Sent /start response")
+
+# Message handler for text messages
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message_text = update.message.text
+    logger.info(f"Processing message: {message_text}")
+    try:
+        grok_response = await call_grok_api(message_text)
+        logger.info(f"Got response from Grok: {grok_response}")
+        await update.message.reply_text(grok_response)
+        logger.info(f"Sent response to Telegram: {grok_response}")
+    except Exception as e:
+        logger.error(f"Error processing message: {str(e)}")
+        await update.message.reply_text(f"Error processing your request: {str(e)}")
+        logger.info("Sent error message to Telegram")
 
 # Function to call Grok API
 async def call_grok_api(message):
     if not GROK_API_KEY:
-        logger.info("GROK_API_KEY is not set")
+        logger.error("GROK_API_KEY is not set")
         return "Error: GROK_API_KEY is not set"
     if not GROK_MODEL:
-        logger.info("GROK_MODEL is not set")
+        logger.error("GROK_MODEL is not set")
         return "Error: GROK_MODEL is not set"
     async with httpx.AsyncClient() as client:
         try:
@@ -70,39 +84,39 @@ async def call_grok_api(message):
             response.raise_for_status()
             data = response.json()
             if "choices" not in data or not data["choices"]:
-                logger.info("No choices in Grok API response")
+                logger.error("No choices in Grok API response")
                 return "Error: No choices in Grok API response"
             return data["choices"][0].get("message", {}).get("content", "No response content")
         except httpx.HTTPStatusError as e:
             error_message = f"HTTP {e.response.status_code}: {e.response.text}"
-            logger.info(f"HTTP error: {error_message}")
+            logger.error(f"HTTP error: {error_message}")
             return f"Error: {error_message}"
         except httpx.RequestError as e:
             error_message = f"Network error: {type(e).__name__}: {str(e)}"
-            logger.info(f"Network error: {error_message}")
+            logger.error(f"Network error: {error_message}")
             return f"Error: {error_message}"
         except Exception as e:
             error_message = f"Unexpected error: {type(e).__name__}: {str(e)}"
-            logger.info(f"Unexpected error: {error_message}")
+            logger.error(f"Unexpected error: {error_message}")
             return f"Error: {error_message}"
 
 # Webhook endpoint
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     try:
-        global bot
-        if bot is None:
-            bot = await initialize_bot()
-        update = await request.json()
-        bot.process_new_updates([telebot.types.Update.de_json(update)])
+        global telegram_app
+        if telegram_app is None:
+            telegram_app = await initialize_bot()
+        update = Update.de_json(await request.json(), telegram_app.bot)
+        await telegram_app.process_update(update)
         logger.info("Update processed successfully")
-        return {"ok": True}
+        return Response(status_code=200)
     except Exception as e:
-        logger.info(f"Webhook error: {str(e)}")
-        return {"ok": False, "error": str(e)}, 500
+        logger.error(f"Webhook error: {str(e)}")
+        return Response(content=f"Error: {str(e)}", status_code=500)
 
 # Startup event
 @app.on_event("startup")
 async def startup():
-    global bot
-    bot = await initialize_bot()
+    global telegram_app
+    telegram_app = await initialize_bot()
