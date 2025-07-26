@@ -100,7 +100,21 @@ async def call_grok_api(message):
                 GROK_API_URL,
                 json={
                     "model": GROK_MODEL,
-                    "messages": [{"role": "user", "content": message}]
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": [
+                            {
+                                "type": "text",
+                                "text": "Your maximum output is 4096 characters."
+                            }
+                            ]
+                        },
+                        {
+                            "role": "user",
+                            "content": message
+                        }
+                    ]
                 },
                 headers={
                     "Authorization": f"Bearer {GROK_API_KEY}",
