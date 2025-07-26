@@ -21,23 +21,69 @@ logger = logging.getLogger(__name__)
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Received /start command")
-    await update.message.reply_text("Hello! I'm a bot powered by Grok. Send me a message, and I'll respond with Grok's answer.")
+    await update.message.reply_text("Hello! I'm BahlulBot, powered by Grok. Use /ask <your question> to get a response, or send a message in private chat.")
     logger.info("Sent /start response")
+
+# Command handler for /ask
+async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        logger.info("Received /ask command with no message content")
+        return
+    
+    chat_type = update.message.chat.type
+    message_thread_id = update.message.message_thread_id
+    # Extract the query after the /ask command
+    query = ' '.join(context.args) if context.args else None
+    
+    logger.info(f"Received /ask command from chat type {chat_type}, thread ID: {message_thread_id}, query: {query}")
+    
+    if not query:
+        reply_params = {"text": "Please provide a question after /ask (e.g., /ask What is the capital of France?)"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent empty query warning")
+        return
+    
+    try:
+        grok_response = await call_grok_api(query)
+        logger.info(f"Got response from Grok: {grok_response}")
+        reply_params = {"text": grok_response}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info(f"Sent response to Telegram: {grok_response}")
+    except Exception as e:
+        logger.error(f"Error processing /ask command: {str(e)}")
+        reply_params = {"text": f"Error processing your request: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent error message to Telegram")
 
 # Message handler for text messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        logger.info("Received update with no message content")
+        return
     message_text = update.message.text
-    if message_text[0]=='@' and len(message_text)>11:
-        message_text=message_text[11:] #skip @bahlulbot<space>
-    logger.info(f"Processing message: {message_text}")
+    chat_type = update.message.chat.type
+    message_thread_id = update.message.message_thread_id
+    logger.info(f"Processing message from chat type {chat_type}, thread ID: {message_thread_id}: {message_text}")
     try:
         grok_response = await call_grok_api(message_text)
         logger.info(f"Got response from Grok: {grok_response}")
-        await update.message.reply_text(grok_response)
+        reply_params = {"text": grok_response}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
         logger.info(f"Sent response to Telegram: {grok_response}")
     except Exception as e:
         logger.error(f"Error processing message: {str(e)}")
-        await update.message.reply_text(f"Error processing your request: {str(e)}")
+        reply_params = {"text": f"Error processing your request: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
         logger.info("Sent error message to Telegram")
 
 # Function to call Grok API
@@ -99,6 +145,7 @@ async def initialize_bot():
     
     # Add handlers
     telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
@@ -108,25 +155,24 @@ async def initialize_bot():
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     try:
-        # Initialize a new Application for each request
         telegram_app = await initialize_bot()
-        update = Update.de_json(await request.json(), telegram_app.bot)
+        update_json = await request.json()
+        logger.info(f"Received update: {update_json}")
+        update = Update.de_json(update_json, telegram_app.bot)
         await telegram_app.process_update(update)
         logger.info("Update processed successfully")
-        
-        # Shut down the application to clean up resources
         await telegram_app.shutdown()
         return Response(status_code=200)
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
         return Response(content=f"Error: {str(e)}", status_code=500)
 
-# Startup event (optional, for logging or other initialization)
+# Startup event
 @app.on_event("startup")
 async def startup():
     logger.info("Application startup")
 
-# Shutdown event (optional, for logging)
+# Shutdown event
 @app.on_event("shutdown")
 async def shutdown():
     logger.info("Application shutdown")
