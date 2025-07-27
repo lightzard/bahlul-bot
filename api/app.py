@@ -60,8 +60,8 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
         
         # Call Grok API with history
-        conversation.pop()
         grok_response = await call_grok_api(conversation)
+        conversation.pop()
         logger.info(f"Got response from Grok: {grok_response}")
         
         # Save to conversation history
@@ -109,10 +109,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Call Grok API with history
         grok_response = await call_grok_api(conversation)
+        conversation.pop()
         logger.info(f"Got response from Grok: {grok_response}")
         
         # Save to conversation history
-        conversation.pop()
         conversation.append({"role": "assistant", "content": grok_response})
         await save_conversation_history(redis_client, conversation_key, conversation)
         
