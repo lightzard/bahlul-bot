@@ -217,6 +217,7 @@ async def initialize_bot():
     # Initialize the application
     logger.info("Initializing Telegram application")
     await telegram_app.initialize()
+    await init_redis()
     
     # Add handlers
     telegram_app.add_handler(CommandHandler("start", start))
