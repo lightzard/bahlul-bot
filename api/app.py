@@ -34,10 +34,10 @@ async def init_redis():
             await redis_client.ping()
             logger.info("Connected to Redis")
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {str(e)}")
+            logger.info(f"Failed to connect to Redis: {str(e)}")
             redis_client = None
     else:
-        logger.warning("REDIS_URL not set, conversation history will not be stored")
+        logger.info("REDIS_URL not set, conversation history will not be stored")
 
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
