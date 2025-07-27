@@ -5,6 +5,9 @@ import httpx
 import os
 import logging
 import asyncio
+import redis.asyncio as redis
+import json
+from uuid import uuid4
 
 app = FastAPI()
 
@@ -13,10 +16,28 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast") 
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
+REDIS_URL = os.getenv("REDIS_URL")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Redis client
+redis_client = None
+
+# Initialize Redis client
+async def init_redis():
+    global redis_client
+    if REDIS_URL:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        try:
+            await redis_client.ping()
+            logger.info("Connected to Redis")
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {str(e)}")
+            redis_client = None
+    else:
+        logger.warning("REDIS_URL not set, conversation history will not be stored")
 
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -31,11 +52,11 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
     message_thread_id = update.message.message_thread_id
-    # Extract the query after the /ask command
     query = ' '.join(context.args) if context.args else None
     
-    logger.info(f"Received /ask command from chat type {chat_type}, thread ID: {message_thread_id}, query: {query}")
+    logger.info(f"Received /ask command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, query: {query}")
     
     if not query:
         reply_params = {"text": "Please provide a question after /ask (e.g., /ask What is the capital of France?)"}
@@ -46,8 +67,23 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        grok_response = await call_grok_api(query)
+        # Get conversation history
+        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
+        conversation = await get_conversation_history(conversation_key)
+        conversation.append({"role": "user", "content": query})
+        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
+        
+        # Call Grok API with history
+        grok_response = await call_grok_api(conversation)
         logger.info(f"Got response from Grok: {grok_response}")
+        
+        # Save to conversation history
+        conversation.pop()
+        conversation.append({"role": "assistant", "content": grok_response})
+        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
+        await save_conversation_history(conversation_key, conversation)
+        
+        # Reply to Telegram
         reply_params = {"text": grok_response}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
@@ -68,11 +104,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     message_text = update.message.text
     chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
     message_thread_id = update.message.message_thread_id
-    logger.info(f"Processing message from chat type {chat_type}, thread ID: {message_thread_id}: {message_text}")
+    logger.info(f"Processing message from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}: {message_text}")
     try:
-        grok_response = await call_grok_api(message_text)
+        # Get conversation history
+        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
+        conversation = await get_conversation_history(conversation_key)
+        conversation.append({"role": "user", "content": message_text})
+        
+        # Call Grok API with history
+        grok_response = await call_grok_api(conversation)
         logger.info(f"Got response from Grok: {grok_response}")
+        
+        # Save to conversation history
+        conversation.append({"role": "assistant", "content": grok_response})
+        await save_conversation_history(conversation_key, conversation)
+        
+        # Reply to Telegram
         reply_params = {"text": grok_response}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
@@ -86,8 +135,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(**reply_params)
         logger.info("Sent error message to Telegram")
 
-# Function to call Grok API
-async def call_grok_api(message):
+# Function to get conversation history from Redis
+async def get_conversation_history(conversation_key: str) -> list:
+    if redis_client is None:
+        return []
+    try:
+        history = await redis_client.get(conversation_key)
+        if history:
+            return json.loads(history)
+        return []
+    except Exception as e:
+        logger.error(f"Error retrieving conversation history: {str(e)}")
+        return []
+
+# Function to save conversation history to Redis
+async def save_conversation_history(conversation_key: str, conversation: list):
+    if redis_client is None:
+        return
+    try:
+        # Limit history to last 10 messages to avoid token limits
+        conversation = conversation[-10:]
+        await redis_client.set(conversation_key, json.dumps(conversation))
+        # Set expiry to 1 hour to manage storage
+        await redis_client.expire(conversation_key, 3600)
+    except Exception as e:
+        logger.error(f"Error saving conversation history: {str(e)}")
+
+# Function to call Grok API with conversation history
+async def call_grok_api(conversation: list):
     if not GROK_API_KEY:
         logger.error("GROK_API_KEY is not set")
         return "Error: GROK_API_KEY is not set"
@@ -100,7 +175,7 @@ async def call_grok_api(message):
                 GROK_API_URL,
                 json={
                     "model": GROK_MODEL,
-                    "messages": [{"role": "user", "content": message}]
+                    "messages": conversation
                 },
                 headers={
                     "Authorization": f"Bearer {GROK_API_KEY}",
@@ -170,9 +245,13 @@ async def telegram_webhook(request: Request):
 # Startup event
 @app.on_event("startup")
 async def startup():
+    await init_redis()
     logger.info("Application startup")
 
 # Shutdown event
 @app.on_event("shutdown")
 async def shutdown():
+    if redis_client:
+        await redis_client.close()
+        logger.info("Redis connection closed")
     logger.info("Application shutdown")

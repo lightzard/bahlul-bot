@@ -1,6 +1,6 @@
 # Telegram Grok Bot
 
-A webhook-based Telegram bot that integrates with the Grok 4 model, hosted on Vercel.
+A webhook-based Telegram bot that integrates with the Grok model, hosted on Vercel.
 
 ## Setup
 1. Install dependencies: `pip install -r requirements.txt`
