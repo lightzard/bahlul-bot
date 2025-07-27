@@ -1,4 +1,5 @@
-python-telegram-bot==20.7
-fastapi==0.115.0
-httpx==0.25.2
-uvicorn==0.30.6
+fastapi
+python-telegram-bot>=20.0
+httpx
+uvicorn
+redis
