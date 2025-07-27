@@ -14,7 +14,7 @@ app = FastAPI()
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-3")  # Default to grok-3
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")  # Default to grok-3-mini-fast
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 REDIS_URL = os.getenv("REDIS_URL")
 
@@ -141,18 +141,14 @@ async def init_redis():
         return None
     
     try:
-        # Parse REDIS_URL to check for rediss:// protocol
+        # Parse REDIS_URL to validate
         parsed_url = urlparse(REDIS_URL)
         if parsed_url.scheme not in ("redis", "rediss"):
             logger.error(f"Invalid REDIS_URL scheme: {parsed_url.scheme}. Expected redis:// or rediss://")
             return None
         
-        # Configure Redis with TLS if rediss://
-        redis_kwargs = {"decode_responses": True}
-        if parsed_url.scheme == "rediss":
-            redis_kwargs["ssl"] = True
-        
-        redis_client = redis.from_url(REDIS_URL, **redis_kwargs)
+        # Create Redis client (rediss:// handles TLS automatically)
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         # Test connection
         await redis_client.ping()
         logger.info("Successfully connected to Redis")
