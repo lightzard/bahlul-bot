@@ -16,7 +16,7 @@ app = FastAPI()
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")  # Default to grok-3-mini-fast
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-4")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 REDIS_URL = os.getenv("REDIS_URL")
 
@@ -281,7 +281,10 @@ async def call_grok_api(conversation: list):
                 GROK_API_URL,
                 json={
                     "model": GROK_MODEL,
-                    "messages": conversation
+                    "messages": conversation,
+                    "search_parameters": {
+                        "mode": "auto"
+                    }
                 },
                 headers={
                     "Authorization": f"Bearer {GROK_API_KEY}",
