@@ -77,7 +77,7 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat.append(assistant(msg["content"]))
 
         # Call Grok API with history
-        response = await chat.run()
+        response = chat.sample()
         grok_response = response.content
         conversation.pop()
         logger.info(f"Got response from Grok: {grok_response}")
@@ -145,7 +145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat.append(assistant(msg["content"]))
 
         # Call Grok API with history
-        response = await chat.run()
+        response = chat.sample()
         grok_response = response.content
         conversation.pop()
         logger.info(f"Got response from Grok: {grok_response}")
