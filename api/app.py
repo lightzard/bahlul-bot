@@ -14,7 +14,7 @@ app = FastAPI()
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")  # Default to grok-3-mini-fast
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 REDIS_URL = os.getenv("REDIS_URL")
 
@@ -51,13 +51,13 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     redis_client = None
     try:
-        # Initialize Redis client for this request
+        # Initialize Redis client
         redis_client = await init_redis()
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": query})
-        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
+        conversation.append({"role": "system", "content": [{"type": "text", "text": "Your maximum output is 4096 characters."}]})
         
         # Send initial message to Telegram
         reply_params = {"text": "Processing..."}
@@ -69,23 +69,35 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         full_response = ""
         async for chunk in call_grok_api_stream(conversation):
             full_response += chunk
-            # Update Telegram message with partial response (limit updates to avoid rate limits)
-            if len(full_response) % 50 == 0 or len(full_response) >= 4000:  # Update every ~50 chars or near limit
-                await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=sent_message.message_id,
-                    text=full_response[:4096] or "Processing...",
-                    message_thread_id=message_thread_id
-                )
+            # Update Telegram message with partial response (avoid message_thread_id in edit)
+            if len(full_response) % 50 == 0 or len(full_response) >= 4000:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=sent_message.message_id,
+                        text=full_response[:4096] or "Processing..."
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to edit message: {str(e)}. Sending new message.")
+                    reply_params = {"text": full_response[:4096] or "Processing..."}
+                    if message_thread_id:
+                        reply_params["message_thread_id"] = message_thread_id
+                    sent_message = await context.bot.send_message(chat_id=chat_id, **reply_params)
         
-        # Final update to ensure complete response
+        # Final update
         conversation.pop()  # Remove system message
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=sent_message.message_id,
-            text=full_response[:4096],
-            message_thread_id=message_thread_id
-        )
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=sent_message.message_id,
+                text=full_response[:4096]
+            )
+        except Exception as e:
+            logger.warning(f"Failed to edit final message: {str(e)}. Sending new message.")
+            reply_params = {"text": full_response[:4096]}
+            if message_thread_id:
+                reply_params["message_thread_id"] = message_thread_id
+            await context.bot.send_message(chat_id=chat_id, **reply_params)
         logger.info(f"Sent final response to Telegram: {full_response[:100]}...")
         
         # Save to conversation history
@@ -117,13 +129,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     redis_client = None
     try:
-        # Initialize Redis client for this request
+        # Initialize Redis client
         redis_client = await init_redis()
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": message_text})
-        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
+        conversation.append({"role": "system", "content": [{"type": "text", "text": "Your maximum output is 4096 characters."}]})
         
         # Send initial message to Telegram
         reply_params = {"text": "Processing..."}
@@ -137,21 +149,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             full_response += chunk
             # Update Telegram message with partial response
             if len(full_response) % 50 == 0 or len(full_response) >= 4000:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=sent_message.message_id,
-                    text=full_response[:4096] or "Processing...",
-                    message_thread_id=message_thread_id
-                )
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=sent_message.message_id,
+                        text=full_response[:4096] or "Processing..."
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to edit message: {str(e)}. Sending new message.")
+                    reply_params = {"text": full_response[:4096] or "Processing..."}
+                    if message_thread_id:
+                        reply_params["message_thread_id"] = message_thread_id
+                    sent_message = await context.bot.send_message(chat_id=chat_id, **reply_params)
         
-        # Final update to ensure complete response
+        # Final update
         conversation.pop()  # Remove system message
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=sent_message.message_id,
-            text=full_response[:4096],
-            message_thread_id=message_thread_id
-        )
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=sent_message.message_id,
+                text=full_response[:4096]
+            )
+        except Exception as e:
+            logger.warning(f"Failed to edit final message: {str(e)}. Sending new message.")
+            reply_params = {"text": full_response[:4096]}
+            if message_thread_id:
+                reply_params["message_thread_id"] = message_thread_id
+            await context.bot.send_message(chat_id=chat_id, **reply_params)
         logger.info(f"Sent final response to Telegram: {full_response[:100]}...")
         
         # Save to conversation history
@@ -250,14 +274,11 @@ async def call_grok_api_stream(conversation: list):
                 async for chunk in response.aiter_text():
                     if chunk:
                         try:
-                            # Assuming chunk is JSON with structure like {"choices": [{"delta": {"content": "text"}}]}
-                            # Adjust based on actual xAI API streaming format
                             chunk_data = json.loads(chunk)
                             content = chunk_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
                             if content:
                                 yield content
                         except json.JSONDecodeError:
-                            # Handle server-sent events (SSE) format if applicable
                             if chunk.startswith("data: "):
                                 try:
                                     chunk_data = json.loads(chunk[6:])
