@@ -24,7 +24,7 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
 ### Environment Variables
 - `TELEGRAM_TOKEN`: Your Telegram bot token from `@BotFather`.
 - `GROK_API_KEY`: Your xAI Grok API key (see https://x.ai/api for details).
-- `GROK_MODEL`: The Grok model to use (default: `grok-4`).
+- `GROK_MODEL`: The Grok model to use (default: `grok-3-mini-fast`).
 - `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash).
 
 ## Setup Instructions

@@ -51,7 +51,6 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     redis_client = None
-    xai_client = None
     try:
         # Initialize Redis client for this request
         redis_client = await init_redis()
@@ -103,9 +102,6 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if redis_client:
             await redis_client.close()
             logger.info("Redis client closed for /ask")
-        if xai_client:
-            await xai_client.close()
-            logger.info("xAI client closed for /ask")
 
 # Message handler for text messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -119,7 +115,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Processing message from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}: {message_text}")
     
     redis_client = None
-    xai_client = None
     try:
         # Initialize Redis client for this request
         redis_client = await init_redis()
@@ -171,9 +166,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if redis_client:
             await redis_client.close()
             logger.info("Redis client closed for handle_message")
-        if xai_client:
-            await xai_client.close()
-            logger.info("xAI client closed for handle_message")
 
 # Initialize Redis client
 async def init_redis():
