@@ -1,20 +1,21 @@
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from xai_sdk import ChatClient
+import httpx
 import os
 import logging
 import asyncio
 import redis.asyncio as redis
 import json
 from urllib.parse import urlparse
+from xai_sdk.client import Client as xAIClient
 
 app = FastAPI()
 
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-4")
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")  # Default to grok-3-mini-fast
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 REDIS_URL = os.getenv("REDIS_URL")
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Received /start command")
-    await update.message.reply_text("Hello! I'm BahlulBot, powered by Grok. Use /ask <your question> to get a response, or send a message in private chat.")
+    await update.message.reply_text("Hello! I'm BahlulBot, powered by Grok. Use /ask <your question> to get a response, /stream <your question> for streaming responses, or send a message in private chat.")
     logger.info("Sent /start response")
 
 # Command handler for /ask
@@ -51,45 +52,29 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     redis_client = None
     try:
-        # Initialize Redis client
+        # Initialize Redis client for this request
         redis_client = await init_redis()
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": query})
-        conversation.append({"role": "system", "content": [{"type": "text", "text": "Your maximum output is 4096 characters."}]})
+        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
         
-        # Send initial message to Telegram
-        reply_params = {"text": "Processing..."}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        sent_message = await update.message.reply_text(**reply_params)
-        
-        # Stream Grok API response, collect full response
-        full_response = ""
-        async for chunk in call_grok_api_stream(conversation):
-            full_response += chunk
-        
-        # Update Telegram message with final response
-        conversation.pop()  # Remove system message
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=sent_message.message_id,
-                text=full_response[:4096] or "No response received."
-            )
-        except Exception as e:
-            logger.warning(f"Failed to edit message: {str(e)}. Sending new message.")
-            reply_params = {"text": full_response[:4096] or "No response received."}
-            if message_thread_id:
-                reply_params["message_thread_id"] = message_thread_id
-            await context.bot.send_message(chat_id=chat_id, **reply_params)
-        logger.info(f"Sent final response to Telegram: {full_response[:100]}...")
+        # Call Grok API with history
+        grok_response = await call_grok_api(conversation)
+        conversation.pop()
+        logger.info(f"Got response from Grok: {grok_response}")
         
         # Save to conversation history
-        conversation.append({"role": "assistant", "content": full_response})
+        conversation.append({"role": "assistant", "content": grok_response})
         await save_conversation_history(redis_client, conversation_key, conversation)
         
+        # Reply to Telegram
+        reply_params = {"text": grok_response}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info(f"Sent response to Telegram: {grok_response}")
     except Exception as e:
         logger.error(f"Error processing /ask command: {str(e)}")
         reply_params = {"text": f"Error processing your request: {str(e)}"}
@@ -101,6 +86,84 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if redis_client:
             await redis_client.close()
             logger.info("Redis client closed for /ask")
+
+# Command handler for /stream
+async def stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        logger.info("Received /stream command with no message content")
+        return
+    
+    chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
+    message_thread_id = update.message.message_thread_id
+    query = ' '.join(context.args) if context.args else None
+    
+    logger.info(f"Received /stream command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, query: {query}")
+    
+    if not query:
+        reply_params = {"text": "Please provide a question after /stream (e.g., /stream What is the capital of France?)"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent empty query warning")
+        return
+    
+    redis_client = None
+    xai_client = None
+    try:
+        # Initialize Redis client for this request
+        redis_client = await init_redis()
+        # Get conversation history
+        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
+        conversation = await get_conversation_history(redis_client, conversation_key)
+        conversation.append({"role": "user", "content": query})
+        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
+        
+        # Initialize xAI SDK client
+        xai_client = xAIClient(api_key=GROK_API_KEY)
+        
+        # Call Grok streaming API
+        full_response = ""
+        reply_params = {"message_thread_id": message_thread_id} if message_thread_id else {}
+        message = await update.message.reply_text("Streaming response...", **reply_params)
+        
+        async for chunk in xai_client.chat.completions.create(
+            model=GROK_MODEL,
+            messages=conversation,
+            stream=True
+        ):
+            content = chunk.choices[0].delta.content or ""
+            if content:
+                full_response += content
+                # Update the message with the latest content, respecting Telegram's 4096 char limit
+                if len(full_response) > 4000:
+                    full_response = full_response[:4000] + "..."
+                    await message.edit_text(full_response)
+                    break
+                await message.edit_text(full_response)
+        
+        conversation.pop()
+        logger.info(f"Got streaming response from Grok: {full_response}")
+        
+        # Save to conversation history
+        conversation.append({"role": "assistant", "content": full_response})
+        await save_conversation_history(redis_client, conversation_key, conversation)
+        
+        logger.info("Sent streaming response to Telegram")
+    except Exception as e:
+        logger.error(f"Error processing /stream command: {str(e)}")
+        reply_params = {"text": f"Error processing your request: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent error message to Telegram")
+    finally:
+        if redis_client:
+            await redis_client.close()
+            logger.info("Redis client closed for /stream")
+        if xai_client:
+            await xai_client.close()
+            logger.info("xAI client closed for /stream")
 
 # Message handler for text messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,45 +178,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     redis_client = None
     try:
-        # Initialize Redis client
+        # Initialize Redis client for this request
         redis_client = await init_redis()
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": message_text})
-        conversation.append({"role": "system", "content": [{"type": "text", "text": "Your maximum output is 4096 characters."}]})
+        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
         
-        # Send initial message to Telegram
-        reply_params = {"text": "Processing..."}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        sent_message = await update.message.reply_text(**reply_params)
-        
-        # Stream Grok API response, collect full response
-        full_response = ""
-        async for chunk in call_grok_api_stream(conversation):
-            full_response += chunk
-        
-        # Update Telegram message with final response
-        conversation.pop()  # Remove system message
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=sent_message.message_id,
-                text=full_response[:4096] or "No response received."
-            )
-        except Exception as e:
-            logger.warning(f"Failed to edit message: {str(e)}. Sending new message.")
-            reply_params = {"text": full_response[:4096] or "No response received."}
-            if message_thread_id:
-                reply_params["message_thread_id"] = message_thread_id
-            await context.bot.send_message(chat_id=chat_id, **reply_params)
-        logger.info(f"Sent final response to Telegram: {full_response[:100]}...")
+        # Call Grok API with history
+        grok_response = await call_grok_api(conversation)
+        conversation.pop()
+        logger.info(f"Got response from Grok: {grok_response}")
         
         # Save to conversation history
-        conversation.append({"role": "assistant", "content": full_response})
+        conversation.append({"role": "assistant", "content": grok_response})
         await save_conversation_history(redis_client, conversation_key, conversation)
         
+        # Reply to Telegram
+        reply_params = {"text": grok_response}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info(f"Sent response to Telegram: {grok_response}")
     except Exception as e:
         logger.error(f"Error processing message: {str(e)}")
         reply_params = {"text": f"Error processing your request: {str(e)}"}
@@ -173,11 +220,15 @@ async def init_redis():
         return None
     
     try:
+        # Parse REDIS_URL to validate
         parsed_url = urlparse(REDIS_URL)
         if parsed_url.scheme not in ("redis", "rediss"):
             logger.error(f"Invalid REDIS_URL scheme: {parsed_url.scheme}. Expected redis:// or rediss://")
             return None
+        
+        # Create Redis client (rediss:// handles TLS automatically)
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        # Test connection
         await redis_client.ping()
         logger.info("Successfully connected to Redis")
         return redis_client
@@ -207,52 +258,56 @@ async def save_conversation_history(redis_client, conversation_key: str, convers
         logger.warning("Redis client not initialized, skipping history save")
         return
     try:
+        # Limit history to last 10 messages to avoid token limits
         conversation = conversation[-10:]
         await redis_client.set(conversation_key, json.dumps(conversation))
+        # Set expiry to 1 hour to manage storage
         await redis_client.expire(conversation_key, 3600)
         logger.info(f"Saved conversation history for {conversation_key}: {json.dumps(conversation)}")
     except Exception as e:
         logger.error(f"Error saving conversation history for {conversation_key}: {str(e)}")
 
-# Function to stream Grok API response using xAI SDK
-async def call_grok_api_stream(conversation: list):
+# Function to call Grok API with conversation history
+async def call_grok_api(conversation: list):
     if not GROK_API_KEY:
         logger.error("GROK_API_KEY is not set")
-        yield "Error: GROK_API_KEY is not set"
-        return
+        return "Error: GROK_API_KEY is not set"
     if not GROK_MODEL:
         logger.error("GROK_MODEL is not set")
-        yield "Error: GROK_MODEL is not set"
-        return
-    
-    try:
-        # Initialize xAI ChatClient
-        client = ChatClient(api_key=GROK_API_KEY)
-        logger.info(f"Sending streaming Grok API request with conversation: {json.dumps(conversation)}")
-        
-        # Stream response using xAI SDK
-        stream = client.chat.completions.create(
-            model=GROK_MODEL,
-            messages=conversation,
-            stream=True
-        )
-        
-        # Process stream chunks
-        async for chunk in stream:
-            logger.debug(f"Raw chunk received: {chunk}")
-            content = chunk.choices[0].delta.content if chunk.choices and chunk.choices[0].delta.content is not None else ""
-            if content:
-                yield content
-            else:
-                logger.warning(f"No content in chunk: {chunk}")
-                
-    except Exception as e:
-        error_message = f"Error streaming from Grok API: {str(e)}"
-        logger.error(error_message)
-        yield error_message
-    finally:
-        # No need to close client explicitly; handled by SDK
-        logger.info("Grok API stream completed")
+        return "Error: GROK_MODEL is not set"
+    async with httpx.AsyncClient() as client:
+        try:
+            logger.info(f"Sending Grok API request with conversation: {json.dumps(conversation)}")
+            response = await client.post(
+                GROK_API_URL,
+                json={
+                    "model": GROK_MODEL,
+                    "messages": conversation
+                },
+                headers={
+                    "Authorization": f"Bearer {GROK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                timeout=60
+            )
+            response.raise_for_status()
+            data = response.json()
+            if "choices" not in data or not data["choices"]:
+                logger.error("No choices in Grok API response")
+                return "Error: No choices in Grok API response"
+            return data["choices"][0].get("message", {}).get("content", "No response content")
+        except httpx.HTTPStatusError as e:
+            error_message = f"HTTP {e.response.status_code}: {e.response.text}"
+            logger.error(f"HTTP error: {error_message}")
+            return f"Error: {error_message}"
+        except httpx.RequestError as e:
+            error_message = f"Network error: {type(e).__name__}: {str(e)}"
+            logger.error(f"Network error: {error_message}")
+            return f"Error: {error_message}"
+        except Exception as e:
+            error_message = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            logger.error(f"Unexpected error: {error_message}")
+            return f"Error: {error_message}"
 
 # Initialize bot for each request
 async def initialize_bot():
@@ -266,11 +321,14 @@ async def initialize_bot():
         .build()
     )
     
+    # Initialize the application
     logger.info("Initializing Telegram application")
     await telegram_app.initialize()
     
+    # Add handlers
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
+    telegram_app.add_handler(CommandHandler("stream", stream))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
