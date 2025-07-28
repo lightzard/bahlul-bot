@@ -1,5 +1,5 @@
-fastapi
-python-telegram-bot>=20.0
-httpx
-uvicorn
-redis
+fastapi>=0.115.0
+python-telegram-bot>=13.7,<20.0  # Keep <20.0 for compatibility; upgrade to >=20.0 if possible
+xai_sdk>=1.0.1  # Latest version as of July 2025, per X post
+redis>=5.0.8
+python-dotenv>=1.0.1

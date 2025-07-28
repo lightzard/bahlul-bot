@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import httpx
+from xai_sdk import ChatClient
 import os
 import logging
 import asyncio
@@ -214,7 +214,7 @@ async def save_conversation_history(redis_client, conversation_key: str, convers
     except Exception as e:
         logger.error(f"Error saving conversation history for {conversation_key}: {str(e)}")
 
-# Function to stream Grok API response
+# Function to stream Grok API response using xAI SDK
 async def call_grok_api_stream(conversation: list):
     if not GROK_API_KEY:
         logger.error("GROK_API_KEY is not set")
@@ -225,55 +225,34 @@ async def call_grok_api_stream(conversation: list):
         yield "Error: GROK_MODEL is not set"
         return
     
-    async with httpx.AsyncClient() as client:
-        try:
-            logger.info(f"Sending streaming Grok API request with conversation: {json.dumps(conversation)}")
-            async with client.stream(
-                "POST",
-                GROK_API_URL,
-                json={
-                    "model": GROK_MODEL,
-                    "messages": conversation,
-                    "stream": True
-                },
-                headers={
-                    "Authorization": f"Bearer {GROK_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                timeout=60
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_text():
-                    if chunk:
-                        try:
-                            chunk_data = json.loads(chunk)
-                            content = chunk_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                            if content:
-                                yield content
-                        except json.JSONDecodeError:
-                            if chunk.startswith("data: "):
-                                try:
-                                    chunk_data = json.loads(chunk[6:])
-                                    content = chunk_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content:
-                                        yield content
-                                except json.JSONDecodeError:
-                                    logger.warning(f"Failed to parse chunk: {chunk}")
-                        except Exception as e:
-                            logger.error(f"Error processing chunk: {str(e)}")
-                            yield f"Error processing chunk: {str(e)}"
-        except httpx.HTTPStatusError as e:
-            error_message = f"HTTP {e.response.status_code}: {e.response.text}"
-            logger.error(f"HTTP error: {error_message}")
-            yield f"Error: {error_message}"
-        except httpx.RequestError as e:
-            error_message = f"Network error: {type(e).__name__}: {str(e)}"
-            logger.error(f"Network error: {error_message}")
-            yield f"Error: {error_message}"
-        except Exception as e:
-            error_message = f"Unexpected error: {type(e).__name__}: {str(e)}"
-            logger.error(f"Unexpected error: {error_message}")
-            yield f"Error: {error_message}"
+    try:
+        # Initialize xAI ChatClient
+        client = ChatClient(api_key=GROK_API_KEY)
+        logger.info(f"Sending streaming Grok API request with conversation: {json.dumps(conversation)}")
+        
+        # Stream response using xAI SDK
+        stream = client.chat.completions.create(
+            model=GROK_MODEL,
+            messages=conversation,
+            stream=True
+        )
+        
+        # Process stream chunks
+        async for chunk in stream:
+            logger.debug(f"Raw chunk received: {chunk}")
+            content = chunk.choices[0].delta.content if chunk.choices and chunk.choices[0].delta.content is not None else ""
+            if content:
+                yield content
+            else:
+                logger.warning(f"No content in chunk: {chunk}")
+                
+    except Exception as e:
+        error_message = f"Error streaming from Grok API: {str(e)}"
+        logger.error(error_message)
+        yield error_message
+    finally:
+        # No need to close client explicitly; handled by SDK
+        logger.info("Grok API stream completed")
 
 # Initialize bot for each request
 async def initialize_bot():
