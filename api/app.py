@@ -9,6 +9,7 @@ import json
 from urllib.parse import urlparse
 from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant
+from xai_sdk.search import SearchParameters
 
 app = FastAPI()
 
@@ -62,8 +63,11 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation.append({"role": "user", "content": query})
         conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
 
-        # Create chat session with xAI SDK
-        chat = xai_client.chat.create(model=GROK_MODEL)
+        # Create chat session with search parameters
+        chat = xai_client.chat.create(
+            model=GROK_MODEL,
+            search_parameters=SearchParameters(mode="auto")
+        )
         for msg in conversation:
             if msg["role"] == "user":
                 chat.append(user(msg["content"]))
@@ -127,8 +131,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation.append({"role": "user", "content": message_text})
         conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
 
-        # Create chat session with xAI SDK
-        chat = xai_client.chat.create(model=GROK_MODEL)
+        # Create chat session with search parameters
+        chat = xai_client.chat.create(
+            model=GROK_MODEL,
+            search_parameters=SearchParameters(mode="auto")
+        )
         for msg in conversation:
             if msg["role"] == "user":
                 chat.append(user(msg["content"]))
