@@ -136,17 +136,11 @@ async def stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_params = {"message_thread_id": message_thread_id} if message_thread_id else {}
         message = await update.message.reply_text("Streaming response...", **reply_params)
         
-        async for response, chunk in chat.stream():
-            content = chunk.content or ""
-            if content:
-                full_response += content
-                # Update the message with the latest content, respecting Telegram's 4096 char limit
-                if len(full_response) > 4000:
-                    full_response = full_response[:4000] + "..."
-                    await message.edit_text(full_response)
-                    break
-                await message.edit_text(full_response)
+        for response, chunk in chat.stream():
+            continue
         
+        full_response = response.content
+        await message.edit_text(full_response)
         conversation.pop()
         logger.info(f"Got streaming response from Grok: {full_response}")
         
@@ -306,7 +300,7 @@ async def call_grok_api(conversation: list):
             logger.error(f"HTTP error: {error_message}")
             return f"Error: {error_message}"
         except httpx.RequestError as e:
-            error_message = f"Network error: {type(e).__name__}: {str(e)}"
+            error_message =.coordinatef"Network error: {type(e).__name__}: {str(e)}"
             logger.error(f"Network error: {error_message}")
             return f"Error: {error_message}"
         except Exception as e:
