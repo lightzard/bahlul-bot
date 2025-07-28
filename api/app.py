@@ -221,6 +221,70 @@ async def save_conversation_history(redis_client, conversation_key: str, convers
     except Exception as e:
         logger.error(f"Error saving conversation history for {conversation_key}: {str(e)}")
 
+# Command handler for /generate
+async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        logger.info("Received /generate command with no message content")
+        return
+    
+    chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
+    message_thread_id = update.message.message_thread_id
+    prompt = ' '.join(context.args) if context.args else None
+    
+    logger.info(f"Received /generate command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, prompt: {prompt}")
+    
+    if not prompt:
+        reply_params = {"text": "Please provide a description after /generate (e.g., /generate A cat in a tree)"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent empty prompt warning")
+        return
+    
+    redis_client = None
+    try:
+        # Initialize Redis client
+        redis_client = await init_redis()
+        # Initialize xAI SDK client
+        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
+        # Get conversation history
+        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
+        conversation = await get_conversation_history(redis_client, conversation_key)
+        conversation.append({"role": "user", "content": f"/generate {prompt}"})
+        
+        # Generate image using xAI SDK
+        response = xai_client.image.sample(
+            model="grok-2-image",
+            prompt=prompt,
+            image_format="url"
+        )
+        image_url = response.url
+        revised_prompt = response.prompt
+        logger.info(f"Generated image with revised prompt: {revised_prompt}, URL: {image_url}")
+        
+        # Save to conversation history
+        conversation.append({"role": "assistant", "content": f"Generated image: {image_url} (Revised prompt: {revised_prompt})"})
+        await save_conversation_history(redis_client, conversation_key, conversation)
+        
+        # Send image to Telegram
+        reply_params = {"photo": image_url}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_photo(**reply_params)
+        logger.info(f"Sent image to Telegram: {image_url}")
+    except Exception as e:
+        logger.error(f"Error processing /generate command: {str(e)}")
+        reply_params = {"text": f"Error generating image: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent error message to Telegram")
+    finally:
+        if redis_client:
+            await redis_client.close()
+            logger.info("Redis client closed for /generate")
+
 # Initialize bot for each request
 async def initialize_bot():
     if not TOKEN:
@@ -240,6 +304,7 @@ async def initialize_bot():
     # Add handlers
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
+    telegram_app.add_handler(CommandHandler("generate", generate))  # New handler
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
