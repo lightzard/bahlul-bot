@@ -3,4 +3,4 @@ python-telegram-bot>=20.0
 httpx
 uvicorn
 redis
-xai-sdk
+xai-sdk==1.0.1
