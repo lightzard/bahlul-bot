@@ -300,7 +300,7 @@ async def call_grok_api(conversation: list):
             logger.error(f"HTTP error: {error_message}")
             return f"Error: {error_message}"
         except httpx.RequestError as e:
-            error_message =.coordinatef"Network error: {type(e).__name__}: {str(e)}"
+            error_message = f"Network error: {type(e).__name__}: {str(e)}"
             logger.error(f"Network error: {error_message}")
             return f"Error: {error_message}"
         except Exception as e:
