@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import httpx
 import os
 import logging
 import asyncio
@@ -9,15 +8,14 @@ import redis.asyncio as redis
 import json
 from urllib.parse import urlparse
 from xai_sdk import Client
-from xai_sdk.chat import user, system
+from xai_sdk.chat import user, system, assistant
 
 app = FastAPI()
 
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-4")
-GROK_API_URL = "https://api.x.ai/v1/chat/completions"
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # Configure logging
@@ -27,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Received /start command")
-    await update.message.reply_text("Hello! I'm BahlulBot, powered by Grok. Use /ask <your question> to get a response, /stream <your question> for streaming responses, or send a message in private chat.")
+    await update.message.reply_text("Hello! I'm BahlulBot, powered by Grok. Use /ask <your question> to get a response, or send a message in private chat.")
     logger.info("Sent /start response")
 
 # Command handler for /ask
@@ -52,17 +50,31 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     redis_client = None
+    xai_client = None
     try:
         # Initialize Redis client for this request
         redis_client = await init_redis()
+        # Initialize xAI SDK client
+        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": query})
         conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
-        
+
+        # Create chat session with xAI SDK
+        chat = xai_client.chat.create(model=GROK_MODEL)
+        for msg in conversation:
+            if msg["role"] == "user":
+                chat.append(user(msg["content"]))
+            elif msg["role"] == "system":
+                chat.append(system(msg["content"][0]["text"]))
+            elif msg["role"] == "assistant":
+                chat.append(assistant(msg["content"]))
+
         # Call Grok API with history
-        grok_response = await call_grok_api(conversation)
+        response = await chat.run()
+        grok_response = response.content
         conversation.pop()
         logger.info(f"Got response from Grok: {grok_response}")
         
@@ -87,82 +99,9 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if redis_client:
             await redis_client.close()
             logger.info("Redis client closed for /ask")
-
-# Command handler for /stream
-async def stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message is None:
-        logger.info("Received /stream command with no message content")
-        return
-    
-    chat_type = update.message.chat.type
-    chat_id = update.message.chat.id
-    message_thread_id = update.message.message_thread_id
-    query = ' '.join(context.args) if context.args else None
-    
-    logger.info(f"Received /stream command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, query: {query}")
-    
-    if not query:
-        reply_params = {"text": "Please provide a question after /stream (e.g., /stream What is the capital of France?)"}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        await update.message.reply_text(**reply_params)
-        logger.info("Sent empty query warning")
-        return
-    
-    redis_client = None
-    xai_client = None
-    try:
-        # Initialize Redis client for this request
-        redis_client = await init_redis()
-        # Get conversation history
-        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
-        conversation = await get_conversation_history(redis_client, conversation_key)
-        conversation.append({"role": "user", "content": query})
-        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
-        
-        # Initialize xAI SDK client
-        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
-        
-        # Create chat session
-        chat = xai_client.chat.create(model=GROK_MODEL)
-        for msg in conversation:
-            if msg["role"] == "user":
-                chat.append(user(msg["content"]))
-            elif msg["role"] == "system":
-                chat.append(system(msg["content"][0]["text"]))
-        
-        # Call Grok streaming API
-        full_response = ""
-        reply_params = {"message_thread_id": message_thread_id} if message_thread_id else {}
-        message = await update.message.reply_text("Streaming response...", **reply_params)
-        
-        for response, chunk in chat.stream():
-            continue
-        
-        full_response = response.content
-        await message.edit_text(full_response)
-        conversation.pop()
-        logger.info(f"Got streaming response from Grok: {full_response}")
-        
-        # Save to conversation history
-        conversation.append({"role": "assistant", "content": full_response})
-        await save_conversation_history(redis_client, conversation_key, conversation)
-        
-        logger.info("Sent streaming response to Telegram")
-    except Exception as e:
-        logger.error(f"Error processing /stream command: {str(e)}")
-        reply_params = {"text": f"Error processing your request: {str(e)}"}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        await update.message.reply_text(**reply_params)
-        logger.info("Sent error message to Telegram")
-    finally:
-        if redis_client:
-            await redis_client.close()
-            logger.info("Redis client closed for /stream")
         if xai_client:
             await xai_client.close()
-            logger.info("xAI client closed for /stream")
+            logger.info("xAI client closed for /ask")
 
 # Message handler for text messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -176,17 +115,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Processing message from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}: {message_text}")
     
     redis_client = None
+    xai_client = None
     try:
         # Initialize Redis client for this request
         redis_client = await init_redis()
+        # Initialize xAI SDK client
+        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": message_text})
         conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
-        
+
+        # Create chat session with xAI SDK
+        chat = xai_client.chat.create(model=GROK_MODEL)
+        for msg in conversation:
+            if msg["role"] == "user":
+                chat.append(user(msg["content"]))
+            elif msg["role"] == "system":
+                chat.append(system(msg["content"][0]["text"]))
+            elif msg["role"] == "assistant":
+                chat.append(assistant(msg["content"]))
+
         # Call Grok API with history
-        grok_response = await call_grok_api(conversation)
+        response = await chat.run()
+        grok_response = response.content
         conversation.pop()
         logger.info(f"Got response from Grok: {grok_response}")
         
@@ -211,6 +164,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if redis_client:
             await redis_client.close()
             logger.info("Redis client closed for handle_message")
+        if xai_client:
+            await xai_client.close()
+            logger.info("xAI client closed for handle_message")
 
 # Initialize Redis client
 async def init_redis():
@@ -266,51 +222,6 @@ async def save_conversation_history(redis_client, conversation_key: str, convers
     except Exception as e:
         logger.error(f"Error saving conversation history for {conversation_key}: {str(e)}")
 
-# Function to call Grok API with conversation history
-async def call_grok_api(conversation: list):
-    if not GROK_API_KEY:
-        logger.error("GROK_API_KEY is not set")
-        return "Error: GROK_API_KEY is not set"
-    if not GROK_MODEL:
-        logger.error("GROK_MODEL is not set")
-        return "Error: GROK_MODEL is not set"
-    async with httpx.AsyncClient() as client:
-        try:
-            logger.info(f"Sending Grok API request with conversation: {json.dumps(conversation)}")
-            response = await client.post(
-                GROK_API_URL,
-                json={
-                    "model": GROK_MODEL,
-                    "messages": conversation,
-                    "search_parameters": {
-                        "mode": "auto"
-                    }
-                },
-                headers={
-                    "Authorization": f"Bearer {GROK_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                timeout=60
-            )
-            response.raise_for_status()
-            data = response.json()
-            if "choices" not in data or not data["choices"]:
-                logger.error("No choices in Grok API response")
-                return "Error: No choices in Grok API response"
-            return data["choices"][0].get("message", {}).get("content", "No response content")
-        except httpx.HTTPStatusError as e:
-            error_message = f"HTTP {e.response.status_code}: {e.response.text}"
-            logger.error(f"HTTP error: {error_message}")
-            return f"Error: {error_message}"
-        except httpx.RequestError as e:
-            error_message = f"Network error: {type(e).__name__}: {str(e)}"
-            logger.error(f"Network error: {error_message}")
-            return f"Error: {error_message}"
-        except Exception as e:
-            error_message = f"Unexpected error: {type(e).__name__}: {str(e)}"
-            logger.error(f"Unexpected error: {error_message}")
-            return f"Error: {error_message}"
-
 # Initialize bot for each request
 async def initialize_bot():
     if not TOKEN:
@@ -330,7 +241,6 @@ async def initialize_bot():
     # Add handlers
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
-    telegram_app.add_handler(CommandHandler("stream", stream))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")

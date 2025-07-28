@@ -1,15 +1,14 @@
 # BahlulBot
 
-BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and hosted on Vercel. It responds to user messages and commands in private and group chats, leveraging the Grok API for intelligent responses. The bot supports conversation context, maintaining a history of interactions to provide coherent responses.
+BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and hosted on Vercel. It responds to user messages and commands in private and group chats, leveraging the Grok API via the xAI SDK for intelligent responses. The bot supports conversation context, maintaining a history of interactions to provide coherent responses.
 
 ## Features
 
-- **Command Handling**: Responds to `/start`, `/ask <question>`, and `/stream <question>` commands in private and group chats.
+- **Command Handling**: Responds to `/start` and `/ask <question>` commands in private and group chats.
 - **Text Message Handling**: Processes regular text messages in private chats and group chats (if privacy mode is disabled and the bot is an admin).
 - **Conversation Context**: Stores up to 10 messages per chat (private or group, including topic threads) in a Redis database with a 1-hour expiry, enabling contextual responses from the Grok API.
-- **Streaming Responses**: The `/stream` command uses the xAI SDK to stream responses from the Grok API in real-time, updating the Telegram message as new content arrives.
 - **Webhook-Based**: Uses FastAPI to handle Telegram webhook updates, optimized for Vercel’s serverless environment.
-- **Grok API Integration**: Powered by xAI’s Grok API (default model: `grok-3`) for generating responses.
+- **Grok API Integration**: Powered by xAI’s Grok API (default model: `grok-4`) via the xAI SDK for generating responses.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
 
 ## Requirements
@@ -17,15 +16,15 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
 ### Dependencies
 - `fastapi`: For building the webhook-based API.
 - `python-telegram-bot>=20.0`: For interacting with the Telegram Bot API.
-- `httpx`: For making asynchronous HTTP requests to the Grok API.
+- `httpx`: For asynchronous HTTP requests (used internally by xAI SDK).
 - `uvicorn`: For running the FastAPI application.
 - `redis`: For storing conversation history in a Redis database.
-- `xai-sdk`: For streaming responses from the Grok API.
+- `xai-sdk`: For interacting with the Grok API.
 
 ### Environment Variables
 - `TELEGRAM_TOKEN`: Your Telegram bot token from `@BotFather`.
 - `GROK_API_KEY`: Your xAI Grok API key (see https://x.ai/api for details).
-- `GROK_MODEL`: The Grok model to use (default: `grok-3`).
+- `GROK_MODEL`: The Grok model to use (default: `grok-4`).
 - `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash).
 
 ## Setup Instructions
@@ -48,7 +47,7 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
    httpx
    uvicorn
    redis
-   xai-sdk
+   xai-sdk==1.0.1
    ```
 
 3. **Set Up a Redis Instance**
@@ -61,7 +60,7 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
    - Add:
      - `TELEGRAM_TOKEN`: Your bot token from `@BotFather`.
      - `GROK_API_KEY`: Your Grok API key.
-     - `GROK_MODEL`: Set to `grok-3` (or another valid model; see https://x.ai/api).
+     - `GROK_MODEL`: Set to `grok-4` (or another valid model; see https://x.ai/api).
      - `REDIS_URL`: The Redis connection URL from Upstash.
 
 5. **Deploy to Vercel**
@@ -82,16 +81,13 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
    - **Private Chat**:
      - Send: `/ask What is the capital of France?`
      - Expected: “The capital of France is Paris.”
-     - Send: `/stream What is its population?`
-     - Expected: Response streams in real-time, e.g., “~2.2 million” (context preserved via Redis).
      - Send: `What is its population?`
      - Expected: “~2.2 million” (context preserved via Redis).
    - **Group Chat** (with privacy mode off and bot as admin):
      - Send: `/ask What is AI?`
      - Expected: “AI is…”
-     - Send: `/stream Give an example.`
-     - Expected: Streams an AI example, using context.
-     - Send: `hello` (should respond if privacy mode is off).
+     - Send: `hello`
+     - Expected: A response using context from previous messages (context preserved via Redis).
 
 8. **Verify Redis Data**
    - Use Upstash Dashboard or CLI:
@@ -134,12 +130,8 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
 
 - **Grok API Issues**:
   - Verify `GROK_API_KEY` and `GROK_MODEL` (see https://x.ai/api).
-  - Check logs for HTTP errors from `https://api.x.ai/v1/chat/completions`.
-
-- **Streaming Issues**:
-  - Ensure `xai-sdk` is installed and `GROK_API_KEY` is valid.
-  - Check logs for errors during `/stream` command processing.
-  - Verify the model supports streaming (e.g., `grok-3` does; image generation models do not).
+  - Check logs for errors from xAI SDK interactions.
+  - Ensure `xai-sdk` is installed (`pip show xai-sdk` should show version `1.0.1`).
 
 ## License
 
