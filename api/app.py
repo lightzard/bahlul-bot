@@ -14,7 +14,7 @@ app = FastAPI()
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-4")
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
 REDIS_URL = os.getenv("REDIS_URL")
 
@@ -65,36 +65,22 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_params["message_thread_id"] = message_thread_id
         sent_message = await update.message.reply_text(**reply_params)
         
-        # Stream Grok API response
+        # Stream Grok API response, collect full response
         full_response = ""
         async for chunk in call_grok_api_stream(conversation):
             full_response += chunk
-            # Update Telegram message with partial response (avoid message_thread_id in edit)
-            if len(full_response) % 50 == 0 or len(full_response) >= 4000:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=sent_message.message_id,
-                        text=full_response[:4096] or "Processing..."
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to edit message: {str(e)}. Sending new message.")
-                    reply_params = {"text": full_response[:4096] or "Processing..."}
-                    if message_thread_id:
-                        reply_params["message_thread_id"] = message_thread_id
-                    sent_message = await context.bot.send_message(chat_id=chat_id, **reply_params)
         
-        # Final update
+        # Update Telegram message with final response
         conversation.pop()  # Remove system message
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=sent_message.message_id,
-                text=full_response[:4096]
+                text=full_response[:4096] or "No response received."
             )
         except Exception as e:
-            logger.warning(f"Failed to edit final message: {str(e)}. Sending new message.")
-            reply_params = {"text": full_response[:4096]}
+            logger.warning(f"Failed to edit message: {str(e)}. Sending new message.")
+            reply_params = {"text": full_response[:4096] or "No response received."}
             if message_thread_id:
                 reply_params["message_thread_id"] = message_thread_id
             await context.bot.send_message(chat_id=chat_id, **reply_params)
@@ -143,36 +129,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_params["message_thread_id"] = message_thread_id
         sent_message = await update.message.reply_text(**reply_params)
         
-        # Stream Grok API response
+        # Stream Grok API response, collect full response
         full_response = ""
         async for chunk in call_grok_api_stream(conversation):
             full_response += chunk
-            # Update Telegram message with partial response
-            if len(full_response) % 50 == 0 or len(full_response) >= 4000:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=sent_message.message_id,
-                        text=full_response[:4096] or "Processing..."
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to edit message: {str(e)}. Sending new message.")
-                    reply_params = {"text": full_response[:4096] or "Processing..."}
-                    if message_thread_id:
-                        reply_params["message_thread_id"] = message_thread_id
-                    sent_message = await context.bot.send_message(chat_id=chat_id, **reply_params)
         
-        # Final update
+        # Update Telegram message with final response
         conversation.pop()  # Remove system message
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=sent_message.message_id,
-                text=full_response[:4096]
+                text=full_response[:4096] or "No response received."
             )
         except Exception as e:
-            logger.warning(f"Failed to edit final message: {str(e)}. Sending new message.")
-            reply_params = {"text": full_response[:4096]}
+            logger.warning(f"Failed to edit message: {str(e)}. Sending new message.")
+            reply_params = {"text": full_response[:4096] or "No response received."}
             if message_thread_id:
                 reply_params["message_thread_id"] = message_thread_id
             await context.bot.send_message(chat_id=chat_id, **reply_params)
