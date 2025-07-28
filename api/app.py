@@ -8,7 +8,8 @@ import asyncio
 import redis.asyncio as redis
 import json
 from urllib.parse import urlparse
-from xai_sdk.client import Client as xAIClient
+from xai_sdk import Client
+from xai_sdk.chat import user, system
 
 app = FastAPI()
 
@@ -120,19 +121,23 @@ async def stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
         
         # Initialize xAI SDK client
-        xai_client = xAIClient(api_key=GROK_API_KEY)
+        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
+        
+        # Create chat session
+        chat = xai_client.chat.create(model=GROK_MODEL)
+        for msg in conversation:
+            if msg["role"] == "user":
+                chat.append(user(msg["content"]))
+            elif msg["role"] == "system":
+                chat.append(system(msg["content"][0]["text"]))
         
         # Call Grok streaming API
         full_response = ""
         reply_params = {"message_thread_id": message_thread_id} if message_thread_id else {}
         message = await update.message.reply_text("Streaming response...", **reply_params)
         
-        async for chunk in xai_client.chat.completions.create(
-            model=GROK_MODEL,
-            messages=conversation,
-            stream=True
-        ):
-            content = chunk.choices[0].delta.content or ""
+        async for response, chunk in chat.stream():
+            content = chunk.content or ""
             if content:
                 full_response += content
                 # Update the message with the latest content, respecting Telegram's 4096 char limit
