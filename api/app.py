@@ -14,6 +14,7 @@ import re
 import aiohttp  # For downloading the image file
 from openai import AsyncOpenAI  # For OpenAI async client
 import base64  # For encoding/decoding image data
+import io
 
 app = FastAPI()
 
