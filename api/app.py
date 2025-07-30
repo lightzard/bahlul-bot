@@ -315,7 +315,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Extract prompt from caption
     prompt_start = len("/edit@BahlulBot") if caption.lower().startswith("/edit@bahlulbot") else len("/edit")
-    prompt = caption[prompt_start:].strip()  # Remove "/edit" or "/edit@BahlulBot" and strip whitespace
+    prompt = caption[prompt_start:].strip()
     if not prompt:
         reply_params = {"text": "Please provide an edit instruction after /edit or /edit@BahlulBot in the caption (e.g., /edit Change the background to a beach)"}
         if message_thread_id:
@@ -324,35 +324,26 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("Sent empty prompt warning")
         return
 
-    # Check for photo in the message
+    # Check for photos in the message
     if not update.message.photo:
-        reply_params = {"text": "Please attach a photo with the /edit or /edit@BahlulBot caption to edit."}
+        reply_params = {"text": "Please attach at least one photo with the /edit or /edit@BahlulBot caption to edit."}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
         logger.info("Sent missing photo warning")
         return
     
-    photo = update.message.photo[-1]  # Get the highest resolution photo
-    
     redis_client = None
     try:
-        # Initialize Redis client
         redis_client = await init_redis()
-        # Initialize OpenAI async client
         openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": f"/edit {prompt}"})
 
-        # Get the photo file
-        file = await photo.get_file()
-        file_url = file.file_path
-
         # Process multiple photos
         images = []
-        for photo in update.message.photo:  # Iterate through all photos in the message
+        for photo in update.message.photo:
             file = await photo.get_file()
             file_url = file.file_path
             async with aiohttp.ClientSession() as session:
@@ -364,24 +355,23 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     image_file.name = f"image_{photo.file_id}.png"
                     images.append(image_file)
 
-        # Make request to OpenAI Image Edit API with multiple images
+        # Make request to OpenAI Image Edit API
+        # Note: OpenAI's edit API typically processes one image, but we'll use the first one for compatibility
         response = await openai_client.images.edit(
             model="gpt-image-1",
-            image=images,  # Pass list of image files
+            image=images[0],  # Use the first image, as per OpenAI's API
             prompt=prompt
         )
         
         image_base64 = response.data[0].b64_json
         image_bytes = base64.b64decode(image_base64)
         
-        # Send the image to Telegram as a file
         reply_params = {"photo": ("edited_image.png", image_bytes, "image/png")}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_photo(**reply_params)
         logger.info(f"Sent edited image to Telegram (base64 length: {len(image_base64)})")
         
-        # Save to conversation history (store prompt and confirmation, not base64 to save space)
         conversation.append({"role": "assistant", "content": f"Edited image generated with prompt: {prompt}"})
         await save_conversation_history(redis_client, conversation_key, conversation)
         
