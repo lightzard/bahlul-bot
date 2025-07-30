@@ -346,7 +346,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_url = file.file_path
         
         # Edit image using xAI SDK
-        response = xai_client.image.edit(
+        response = xai_client.image.sample(
             model="grok-2-image",
             image_url=file_url,
             prompt=prompt,
