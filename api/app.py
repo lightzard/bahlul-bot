@@ -10,13 +10,17 @@ from urllib.parse import urlparse
 from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant
 from xai_sdk.search import SearchParameters
-import re  # For regex handling
+import re
+import httpx  # For making HTTP requests to OpenAI API
+import io
+import aiohttp  # For downloading the image file
 
 app = FastAPI()
 
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Added for OpenAI API
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")
 REDIS_URL = os.getenv("REDIS_URL")
 
@@ -334,52 +338,53 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Initialize Redis client
         redis_client = await init_redis()
-        # Initialize xAI SDK client
-        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
-        
+        conversation.append({"role": "user", "content": f"/edit {prompt}"})
+
         # Get the photo file
         file = await photo.get_file()
         file_url = file.file_path
 
-        # Extract image caption generation from grok
-        conversation.append({"role": "user","content": {"type": "image_url","image_url": {"url": file_url,"detail": "high"}}})
-        conversation.append({"role": "user", "content": {"type": "text","text": "What is in this image?"}})                     
-                
-        # Create chat session with search parameters
-        chat = xai_client.chat.create(
-            model=GROK_MODEL,
-            search_parameters=SearchParameters(mode="auto")
-        )
-        for msg in conversation:
-            if msg["role"] == "user":
-                chat.append(user(msg["content"]))
-            elif msg["role"] == "system":
-                chat.append(system(msg["content"][0]["text"]))
-            elif msg["role"] == "assistant":
-                chat.append(assistant(msg["content"]))
+        # Download the image
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Failed to download image: HTTP {resp.status}")
+                image_data = await resp.read()
 
-        # Call Grok API with history
-        response = chat.sample()
-        grok_response = response.content
+        # Prepare the image for OpenAI API
+        image_file = io.BytesIO(image_data)
+        image_file.name = "image.jpg"  # Set a name for the file
+
+        # Make request to OpenAI Image Edit API
+        async with httpx.AsyncClient(timeout=3600) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/images/edits",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                },
+                files={
+                    "image": ("image.jpg", image_file, "image/jpeg"),
+                },
+                data={
+                    "prompt": prompt,
+                    "n": 1,  # Number of images to generate
+                    "size": "1024x1024",  # Default size
+                    "response_format": "url",
+                },
+            )
         
-        conversation.append({"role": "assistant", "content": grok_response})
-        conversation.append({"role": "user", "content": f"/edit {prompt}"})
-
-        # Generate image using xAI SDK based on grok_response
-        response = xai_client.image.sample(
-            model="grok-2-image",
-            prompt=f"Given an image with description as follows: {grok_response}. {prompt}",
-            image_format="url"
-        )
-        edited_image_url = response.url
-        revised_prompt = response.prompt
-        logger.info(f"Edited image with revised prompt: {revised_prompt}, URL: {edited_image_url}")
+        if response.status_code != 200:
+            raise Exception(f"OpenAI API error: {response.text}")
+        
+        response_data = response.json()
+        edited_image_url = response_data["data"][0]["url"]
+        logger.info(f"Edited image with prompt: {prompt}, URL: {edited_image_url}")
         
         # Save to conversation history
-        conversation.append({"role": "assistant", "content": f"Edited image: {edited_image_url} (Revised prompt: {revised_prompt})"})
+        conversation.append({"role": "assistant", "content": f"Edited image: {edited_image_url} (Prompt: {prompt})"})
         await save_conversation_history(redis_client, conversation_key, conversation)
         
         # Send edited image to Telegram
@@ -420,7 +425,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
-    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)), edit))  # Updated to handle /edit and /edit@BahlulBot
+    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)), edit))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")

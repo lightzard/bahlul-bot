@@ -4,3 +4,4 @@ httpx
 uvicorn
 redis
 xai-sdk==1.0.1
+aiohttp
