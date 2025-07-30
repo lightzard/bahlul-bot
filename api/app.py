@@ -339,17 +339,45 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
-        conversation.append({"role": "user", "content": f"/edit {prompt}"})
         
         # Get the photo file
         file = await photo.get_file()
         file_url = file.file_path
+
+        # Extract image caption generation from grok
+        conversation.append(
+            {
+                "role": "user","content": [
+                    {"type": "image_url","image_url": {"url": file_url,"detail": "high"}},
+                    {"type": "text","text": "What is in this image?"}
+                ]
+            }
+        )
         
-        # Edit image using xAI SDK
+        # Create chat session with search parameters
+        chat = xai_client.chat.create(
+            model=GROK_MODEL,
+            search_parameters=SearchParameters(mode="auto")
+        )
+        for msg in conversation:
+            if msg["role"] == "user":
+                chat.append(user(msg["content"]))
+            elif msg["role"] == "system":
+                chat.append(system(msg["content"][0]["text"]))
+            elif msg["role"] == "assistant":
+                chat.append(assistant(msg["content"]))
+
+        # Call Grok API with history
+        response = chat.sample()
+        grok_response = response.content
+        
+        conversation.append({"role": "assistant", "content": grok_response})
+        conversation.append({"role": "user", "content": f"/edit {prompt}"})
+
+        # Generate image using xAI SDK based on grok_response
         response = xai_client.image.sample(
             model="grok-2-image",
-            image_url=file_url,
-            prompt=prompt,
+            prompt=f"Given an image with description as follows: {grok_response}. {prompt}",
             image_format="url"
         )
         edited_image_url = response.url
