@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant
 from xai_sdk.search import SearchParameters
+import re  # Added for regex handling
 
 app = FastAPI()
 
@@ -396,7 +397,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
-    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.CAPTION_REGEX(r'^/edit\b.*', re.IGNORECASE), edit))  # Updated handler for photo with /edit caption
+    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.Caption(r'^/edit\b.*', re.IGNORECASE), edit))  # Updated to use filters.Caption
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
