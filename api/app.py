@@ -294,33 +294,40 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_type = update.message.chat.type
     chat_id = update.message.chat.id
     message_thread_id = update.message.message_thread_id
-    prompt = ' '.join(context.args) if context.args else None
+    caption = update.message.caption
     
-    logger.info(f"Received /edit command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, prompt: {prompt}")
+    logger.info(f"Received /edit command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
     
+    # Check if caption starts with /edit and extract prompt
+    if not caption or not caption.lower().startswith("/edit"):
+        reply_params = {"text": "Please provide a caption starting with /edit followed by the edit instruction (e.g., /edit Change the background to a beach)"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent invalid caption warning")
+        return
+    
+    # Extract prompt from caption
+    prompt = caption[5:].strip()  # Remove "/edit" and strip whitespace
     if not prompt:
-        reply_params = {"text": "Please provide an edit instruction after /edit (e.g., /edit Change the background to a beach)"}
+        reply_params = {"text": "Please provide an edit instruction after /edit in the caption (e.g., /edit Change the background to a beach)"}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
         logger.info("Sent empty prompt warning")
         return
 
-    # Check for photo in the message or in the replied-to message
-    photo = None
-    if update.message.photo:
-        photo = update.message.photo[-1]  # Get the highest resolution photo
-    elif update.message.reply_to_message and update.message.reply_to_message.photo:
-        photo = update.message.reply_to_message.photo[-1]
-    
-    if not photo:
-        reply_params = {"text": "Please attach a photo or reply to a message with a photo to edit."}
+    # Check for photo in the message
+    if not update.message.photo:
+        reply_params = {"text": "Please attach a photo with the /edit caption to edit."}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
         logger.info("Sent missing photo warning")
         return
-
+    
+    photo = update.message.photo[-1]  # Get the highest resolution photo
+    
     redis_client = None
     try:
         # Initialize Redis client
@@ -389,7 +396,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
-    telegram_app.add_handler(CommandHandler("edit", edit))  # New handler
+    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.CAPTION_REGEX(r'^/edit\b.*', re.IGNORECASE), edit))  # Updated handler for photo with /edit caption
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
