@@ -356,10 +356,13 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     raise Exception(f"Failed to download image: HTTP {resp.status}")
                 image_data = await resp.read()
 
+        image_file = io.BytesIO(image_data)
+        image_file.name = "image.jpg"
+
         # Make request to OpenAI Image Edit API
         response = await openai_client.images.edit(
             model="gpt-image-1",  # Use the specified model
-            image=image_data,
+            image=image_file,
             prompt=prompt
         )
         
