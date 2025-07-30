@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant
 from xai_sdk.search import SearchParameters
-import re  # Added for regex handling
+import re  # For regex handling
 
 app = FastAPI()
 
@@ -299,9 +299,9 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Received /edit command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
     
-    # Check if caption starts with /edit and extract prompt
-    if not caption or not caption.lower().startswith("/edit"):
-        reply_params = {"text": "Please provide a caption starting with /edit followed by the edit instruction (e.g., /edit Change the background to a beach)"}
+    # Check if caption starts with /edit or /edit@BahlulBot
+    if not caption or not re.match(r'^/edit(@BahlulBot)?\b', caption, re.IGNORECASE):
+        reply_params = {"text": "Please provide a caption starting with /edit or /edit@BahlulBot followed by the edit instruction (e.g., /edit Change the background to a beach)"}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
@@ -309,9 +309,10 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Extract prompt from caption
-    prompt = caption[5:].strip()  # Remove "/edit" and strip whitespace
+    prompt_start = len("/edit@BahlulBot") if caption.lower().startswith("/edit@bahlulbot") else len("/edit")
+    prompt = caption[prompt_start:].strip()  # Remove "/edit" or "/edit@BahlulBot" and strip whitespace
     if not prompt:
-        reply_params = {"text": "Please provide an edit instruction after /edit in the caption (e.g., /edit Change the background to a beach)"}
+        reply_params = {"text": "Please provide an edit instruction after /edit or /edit@BahlulBot in the caption (e.g., /edit Change the background to a beach)"}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
@@ -320,7 +321,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Check for photo in the message
     if not update.message.photo:
-        reply_params = {"text": "Please attach a photo with the /edit caption to edit."}
+        reply_params = {"text": "Please attach a photo with the /edit or /edit@BahlulBot caption to edit."}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
@@ -397,7 +398,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
-    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.Caption(r'^/edit\b.*', re.IGNORECASE), edit))  # Updated to use filters.Caption
+    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.Regex(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE), edit))  # Updated to handle /edit and /edit@BahlulBot
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
