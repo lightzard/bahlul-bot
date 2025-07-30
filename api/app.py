@@ -398,7 +398,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
-    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.Regex(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE), edit))  # Updated to handle /edit and /edit@BahlulBot
+    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE), edit)))  # Updated to handle /edit and /edit@BahlulBot
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
