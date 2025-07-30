@@ -358,7 +358,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 image_data = await resp.read()
 
         image_file = io.BytesIO(image_data)
-        image_file.name = "image.jpg"
+        image_file.name = "image.png"
 
         # Make request to OpenAI Image Edit API
         response = await openai_client.images.edit(
