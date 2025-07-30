@@ -345,15 +345,9 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_url = file.file_path
 
         # Extract image caption generation from grok
-        conversation.append(
-            {
-                "role": "user","content": [
-                    {"type": "image_url","image_url": {"url": file_url,"detail": "high"}},
-                    {"type": "text","text": "What is in this image?"}
-                ]
-            }
-        )
-        
+        conversation.append({"role": "user","content": {"type": "image_url","image_url": {"url": file_url,"detail": "high"}}})
+        conversation.append({"role": "user", "content": {"type": "text","text": "What is in this image?"}})                     
+                
         # Create chat session with search parameters
         chat = xai_client.chat.create(
             model=GROK_MODEL,
