@@ -360,10 +360,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = await openai_client.images.edit(
             model="gpt-image-1",  # Use the specified model
             image=image_data,
-            prompt=prompt,
-            n=1,
-            size="1024x1024",
-            response_format="b64_json"
+            prompt=prompt
         )
         
         image_base64 = response.data[0].b64_json
