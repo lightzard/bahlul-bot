@@ -11,9 +11,9 @@ from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant
 from xai_sdk.search import SearchParameters
 import re
-import httpx  # For making HTTP requests to OpenAI API
-import io
 import aiohttp  # For downloading the image file
+from openai import AsyncOpenAI  # For OpenAI async client
+import base64  # For encoding/decoding image data
 
 app = FastAPI()
 
@@ -338,6 +338,8 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Initialize Redis client
         redis_client = await init_redis()
+        # Initialize OpenAI async client
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
@@ -354,45 +356,30 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     raise Exception(f"Failed to download image: HTTP {resp.status}")
                 image_data = await resp.read()
 
-        # Prepare the image for OpenAI API
-        image_file = io.BytesIO(image_data)
-        image_file.name = "image.jpg"  # Set a name for the file
-
         # Make request to OpenAI Image Edit API
-        async with httpx.AsyncClient(timeout=3600) as client:
-            response = await client.post(
-                "https://api.openai.com/v1/images/edits",
-                headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                },
-                files={
-                    "image": ("image.jpg", image_file, "image/jpeg"),
-                },
-                data={
-                    "prompt": prompt,
-                    "n": 1,  # Number of images to generate
-                    "size": "1024x1024",  # Default size
-                    "response_format": "url",
-                },
-            )
+        response = await openai_client.images.edit(
+            model="gpt-image-1",  # Use the specified model
+            image=image_data,
+            prompt=prompt,
+            n=1,
+            size="1024x1024",
+            response_format="b64_json"
+        )
         
-        if response.status_code != 200:
-            raise Exception(f"OpenAI API error: {response.text}")
+        image_base64 = response.data[0].b64_json
+        image_bytes = base64.b64decode(image_base64)
         
-        response_data = response.json()
-        edited_image_url = response_data["data"][0]["url"]
-        logger.info(f"Edited image with prompt: {prompt}, URL: {edited_image_url}")
-        
-        # Save to conversation history
-        conversation.append({"role": "assistant", "content": f"Edited image: {edited_image_url} (Prompt: {prompt})"})
-        await save_conversation_history(redis_client, conversation_key, conversation)
-        
-        # Send edited image to Telegram
-        reply_params = {"photo": edited_image_url}
+        # Send the image to Telegram as a file
+        reply_params = {"photo": ("edited_image.png", image_bytes, "image/png")}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_photo(**reply_params)
-        logger.info(f"Sent edited image to Telegram: {edited_image_url}")
+        logger.info(f"Sent edited image to Telegram (base64 length: {len(image_base64)})")
+        
+        # Save to conversation history (store prompt and confirmation, not base64 to save space)
+        conversation.append({"role": "assistant", "content": f"Edited image generated with prompt: {prompt}"})
+        await save_conversation_history(redis_client, conversation_key, conversation)
+        
     except Exception as e:
         logger.error(f"Error processing /edit command: {str(e)}")
         reply_params = {"text": f"Error editing image: {str(e)}"}
