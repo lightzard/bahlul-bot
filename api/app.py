@@ -285,6 +285,90 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await redis_client.close()
             logger.info("Redis client closed for /generate")
 
+# Command handler for /edit
+async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        logger.info("Received /edit command with no message content")
+        return
+    
+    chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
+    message_thread_id = update.message.message_thread_id
+    prompt = ' '.join(context.args) if context.args else None
+    
+    logger.info(f"Received /edit command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, prompt: {prompt}")
+    
+    if not prompt:
+        reply_params = {"text": "Please provide an edit instruction after /edit (e.g., /edit Change the background to a beach)"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent empty prompt warning")
+        return
+
+    # Check for photo in the message or in the replied-to message
+    photo = None
+    if update.message.photo:
+        photo = update.message.photo[-1]  # Get the highest resolution photo
+    elif update.message.reply_to_message and update.message.reply_to_message.photo:
+        photo = update.message.reply_to_message.photo[-1]
+    
+    if not photo:
+        reply_params = {"text": "Please attach a photo or reply to a message with a photo to edit."}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent missing photo warning")
+        return
+
+    redis_client = None
+    try:
+        # Initialize Redis client
+        redis_client = await init_redis()
+        # Initialize xAI SDK client
+        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
+        # Get conversation history
+        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
+        conversation = await get_conversation_history(redis_client, conversation_key)
+        conversation.append({"role": "user", "content": f"/edit {prompt}"})
+        
+        # Get the photo file
+        file = await photo.get_file()
+        file_url = file.file_path
+        
+        # Edit image using xAI SDK
+        response = xai_client.image.edit(
+            model="grok-2-image",
+            image_url=file_url,
+            prompt=prompt,
+            image_format="url"
+        )
+        edited_image_url = response.url
+        revised_prompt = response.prompt
+        logger.info(f"Edited image with revised prompt: {revised_prompt}, URL: {edited_image_url}")
+        
+        # Save to conversation history
+        conversation.append({"role": "assistant", "content": f"Edited image: {edited_image_url} (Revised prompt: {revised_prompt})"})
+        await save_conversation_history(redis_client, conversation_key, conversation)
+        
+        # Send edited image to Telegram
+        reply_params = {"photo": edited_image_url}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_photo(**reply_params)
+        logger.info(f"Sent edited image to Telegram: {edited_image_url}")
+    except Exception as e:
+        logger.error(f"Error processing /edit command: {str(e)}")
+        reply_params = {"text": f"Error editing image: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent error message to Telegram")
+    finally:
+        if redis_client:
+            await redis_client.close()
+            logger.info("Redis client closed for /edit")
+
 # Initialize bot for each request
 async def initialize_bot():
     if not TOKEN:
@@ -304,7 +388,8 @@ async def initialize_bot():
     # Add handlers
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
-    telegram_app.add_handler(CommandHandler("generate", generate))  # New handler
+    telegram_app.add_handler(CommandHandler("generate", generate))
+    telegram_app.add_handler(CommandHandler("edit", edit))  # New handler
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
