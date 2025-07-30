@@ -14,7 +14,6 @@ import re
 import aiohttp  # For downloading the image file
 from openai import AsyncOpenAI  # For OpenAI async client
 import base64  # For encoding/decoding image data
-import io
 
 app = FastAPI()
 
@@ -350,22 +349,10 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await photo.get_file()
         file_url = file.file_path
 
-        # Download the image
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file_url) as resp:
-                if resp.status != 200:
-                    raise Exception(f"Failed to download image: HTTP {resp.status}")
-                image_data = await resp.read()
-
-        image_file = io.BytesIO(image_data)
-        image_file.name = "image.png"
-
         # Make request to OpenAI Image Edit API
         response = await openai_client.images.edit(
-            model="dall-e-2",  # Use the specified model
-            image=image_file,
-            prompt=prompt,
-            size="1024x1024"
+            model="gpt-image-1",  # Use the specified model
+            image=[open(file_url, "rb")]
         )
         
         image_base64 = response.data[0].b64_json
