@@ -351,7 +351,8 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image=image_file,
             prompt=prompt,
             n=1,
-            input_fidelity='high'
+            quality='low',
+            size='1024x1024'
         )
         
         image_base64 = response.data[0].b64_json
@@ -376,7 +377,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await redis_client.delete('is_editing')
             await redis_client.close()
             logger.info("Redis client closed and 'is_editing' key deleted")
-            
+
 # Initialize bot for each request
 async def initialize_bot():
     global telegram_app
