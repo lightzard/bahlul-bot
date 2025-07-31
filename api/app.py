@@ -297,7 +297,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global telegram_app
     webhook_info = await telegram_app.bot.get_webhook_info()
-    if webhook_info.pending_update_count > 0:
+    if webhook_info.pending_update_count > 1:
         logger.info(f"Pending updates found: {webhook_info.pending_update_count}. Returning 200 immediately.")
         return
     if update.message is None:
