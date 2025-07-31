@@ -378,6 +378,92 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await redis_client.close()
             logger.info("Redis client closed and 'is_editing' key deleted")
 
+# Command handler for /editFidelity
+async def editFidelity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global telegram_app
+    webhook_info = await telegram_app.bot.get_webhook_info()
+    if webhook_info.pending_update_count > 1:
+        logger.info(f"Pending updates found: {webhook_info.pending_update_count}. Returning 200 immediately.")
+        return
+    if update.message is None:
+        logger.info("Received /edit command with no message content")
+        return
+    
+    chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
+    message_thread_id = update.message.message_thread_id
+    caption = update.message.caption
+    
+    logger.info(f"Received /editFidelity command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
+    
+    # Extract prompt from caption
+    prompt_start = len("/editFidelity@BahlulBot") if caption.lower().startswith("/editFidelity@bahlulbot") else len("/editFidelity")
+    prompt = caption[prompt_start:].strip()
+    photo = update.message.photo[-1]  # Get the highest resolution photo
+    
+    redis_client = None
+    try:
+        # Initialize Redis client
+        redis_client = await init_redis()
+        if redis_client is not None:
+            # Attempt to set 'is_editing' to '1' only if it doesn't exist, with 60s expiration
+            set_result = await redis_client.set('is_editing', '1', nx=True, ex=60)
+            if not set_result:
+                logger.info("Another edit is in progress, skipping this request")
+                return
+        else:
+            logger.warning("Redis is not available, proceeding without edit lock")
+        
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        
+        # Get the photo file
+        file = await photo.get_file()
+        file_url = file.file_path
+
+        # Download the image
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Failed to download image: HTTP {resp.status}")
+                image_data = await resp.read()
+
+        image_file = io.BytesIO(image_data)
+        image_file.name = "image.png"
+
+        # Make request to OpenAI Image Edit API
+        response = await openai_client.images.edit(
+            model="gpt-image-1",
+            image=image_file,
+            prompt=prompt,
+            n=1,
+            quality='low',
+            size='1024x1024',
+            input_fidelity='high'
+        )
+        
+        image_base64 = response.data[0].b64_json
+        image_bytes = base64.b64decode(image_base64)
+        
+        logger.info("Successfully received response from image edit")
+        reply_params = {"photo": image_bytes}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_photo(**reply_params)
+        logger.info(f"Sent edited image to Telegram (base64 length: {len(image_base64)})")
+        
+    except Exception as e:
+        logger.error(f"Error processing /edit command: {str(e)}")
+        reply_params = {"text": f"Error editing image: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent error message to Telegram")
+    finally:
+        if redis_client is not None:
+            await redis_client.delete('is_editing')
+            await redis_client.close()
+            logger.info("Redis client closed and 'is_editing' key deleted")
+
 # Initialize bot for each request
 async def initialize_bot():
     global telegram_app
@@ -399,6 +485,9 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
+    telegram_app.add_handler(MessageHandler(
+    filters.PHOTO & filters.CaptionRegex(re.compile(r'^/editFidelity(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
+    editFidelity))
     telegram_app.add_handler(MessageHandler(
     filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
     edit))
