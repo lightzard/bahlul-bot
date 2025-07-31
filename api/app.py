@@ -191,7 +191,7 @@ async def init_redis():
         # Create Redis client (rediss:// handles TLS automatically)
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         # Test connection
-        await redis_client.ping()
+        #await redis_client.ping()
         logger.info("Successfully connected to Redis")
         return redis_client
     except Exception as e:
@@ -316,7 +316,19 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = caption[prompt_start:].strip()
     photo = update.message.photo[-1]  # Get the highest resolution photo
     
+    redis_client = None
     try:
+        # Initialize Redis client
+        redis_client = await init_redis()
+        if redis_client is not None:
+            # Attempt to set 'is_editing' to '1' only if it doesn't exist, with 60s expiration
+            set_result = await redis_client.set('is_editing', '1', nx=True, ex=60)
+            if not set_result:
+                logger.info("Another edit is in progress, skipping this request")
+                return
+        else:
+            logger.warning("Redis is not available, proceeding without edit lock")
+        
         openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         
         # Get the photo file
@@ -334,10 +346,9 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_file.name = "image.png"
 
         # Make request to OpenAI Image Edit API
-        # Note: OpenAI's edit API typically processes one image, but we'll use the first one for compatibility
         response = await openai_client.images.edit(
             model="gpt-image-1",
-            image=image_file,  # Use the first image, as per OpenAI's API
+            image=image_file,
             prompt=prompt,
             n=1,
             input_fidelity='high'
@@ -346,7 +357,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_base64 = response.data[0].b64_json
         image_bytes = base64.b64decode(image_base64)
         
-        logger.info("Success get response from image edit")
+        logger.info("Successfully received response from image edit")
         reply_params = {"photo": image_bytes}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
@@ -360,7 +371,12 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
         logger.info("Sent error message to Telegram")
-
+    finally:
+        if redis_client is not None:
+            await redis_client.delete('is_editing')
+            await redis_client.close()
+            logger.info("Redis client closed and 'is_editing' key deleted")
+            
 # Initialize bot for each request
 async def initialize_bot():
     global telegram_app
