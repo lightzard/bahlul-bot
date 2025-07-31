@@ -29,6 +29,8 @@ REDIS_URL = os.getenv("REDIS_URL")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+telegram_app = None
+
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Received /start command")
@@ -293,6 +295,10 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Command handler for /edit
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    webhook_info = await telegram_app.bot.get_webhook_info()
+    if webhook_info.pending_update_count > 0:
+        logger.info(f"Pending updates found: {webhook_info.pending_update_count}. Returning 200 immediately.")
+        return
     if update.message is None:
         logger.info("Received /edit command with no message content")
         return
@@ -391,17 +397,7 @@ async def telegram_webhook(request: Request):
         logger.info(f"Received update: {update_json}")
         update = Update.de_json(update_json, telegram_app.bot)
 
-        # Check if the update is for the /edit command
-        if update.message and update.message.caption:
-            caption = update.message.caption.lower()
-            if caption.startswith(("/edit", "/edit@bahlulbot")) and update.message.photo:
-                # Offload /edit processing to a background task
-                asyncio.create_task(process_edit_command(telegram_app, update))
-                logger.info("Offloaded /edit command to background task")
-                await telegram_app.shutdown()
-                return Response(status_code=200)
-
-        # Process other updates synchronously
+        # Process updates synchronously
         await telegram_app.process_update(update)
         logger.info("Update processed successfully")
         await telegram_app.shutdown()
@@ -410,15 +406,6 @@ async def telegram_webhook(request: Request):
         logger.error(f"Webhook error: {str(e)}")
         await telegram_app.shutdown()
         return Response(content=f"Error: {str(e)}", status_code=500)
-
-# Helper function to process /edit command in the background
-async def process_edit_command(telegram_app, update):
-    try:
-        # Replicate the logic from the MessageHandler for /edit
-        await edit(update, telegram_app)
-        logger.info("Background /edit processing completed")
-    except Exception as e:
-        logger.error(f"Error in background /edit processing: {str(e)}")
 
 # Startup event
 @app.on_event("startup")
