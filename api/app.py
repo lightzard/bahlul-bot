@@ -366,7 +366,8 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_base64 = response.data[0].b64_json
         image_bytes = base64.b64decode(image_base64)
         
-        reply_params = {"photo": ("edited_image.png", image_bytes, "image/png")}
+        logger.info("Success get response from image edit")
+        reply_params = {"photo": image_bytes}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_photo(**reply_params)
