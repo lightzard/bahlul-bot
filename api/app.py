@@ -339,10 +339,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         redis_client = await init_redis()
         openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
-        conversation = await get_conversation_history(redis_client, conversation_key)
-        conversation.append({"role": "user", "content": f"/edit {prompt}"})
-
+        
         # Get the photo file
         file = await photo.get_file()
         file_url = file.file_path
@@ -377,9 +374,6 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_photo(**reply_params)
         logger.info(f"Sent edited image to Telegram (base64 length: {len(image_base64)})")
         
-        conversation.append({"role": "assistant", "content": f"Edited image generated with prompt: {prompt}"})
-        await save_conversation_history(redis_client, conversation_key, conversation)
-        
     except Exception as e:
         logger.error(f"Error processing /edit command: {str(e)}")
         reply_params = {"text": f"Error editing image: {str(e)}"}
@@ -412,7 +406,9 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
-    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)), edit))
+    telegram_app.add_handler(MessageHandler(
+    filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.ME,
+    edit))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
