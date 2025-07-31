@@ -332,7 +332,6 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             n=1,
             size="1024x1024",
             quality="low",
-            response_format="b64_json",
             moderation="low"
         )
         
