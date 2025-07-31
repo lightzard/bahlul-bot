@@ -390,13 +390,35 @@ async def telegram_webhook(request: Request):
         update_json = await request.json()
         logger.info(f"Received update: {update_json}")
         update = Update.de_json(update_json, telegram_app.bot)
-        telegram_app.process_update(update)
+
+        # Check if the update is for the /edit command
+        if update.message and update.message.caption:
+            caption = update.message.caption.lower()
+            if caption.startswith(("/edit", "/edit@bahlulbot")) and update.message.photo:
+                # Offload /edit processing to a background task
+                asyncio.create_task(process_edit_command(telegram_app, update))
+                logger.info("Offloaded /edit command to background task")
+                await telegram_app.shutdown()
+                return Response(status_code=200)
+
+        # Process other updates synchronously
+        await telegram_app.process_update(update)
         logger.info("Update processed successfully")
         await telegram_app.shutdown()
         return Response(status_code=200)
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
+        await telegram_app.shutdown()
         return Response(content=f"Error: {str(e)}", status_code=500)
+
+# Helper function to process /edit command in the background
+async def process_edit_command(telegram_app, update):
+    try:
+        # Replicate the logic from the MessageHandler for /edit
+        await edit(update, telegram_app)
+        logger.info("Background /edit processing completed")
+    except Exception as e:
+        logger.error(f"Error in background /edit processing: {str(e)}")
 
 # Startup event
 @app.on_event("startup")
