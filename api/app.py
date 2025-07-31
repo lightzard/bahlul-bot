@@ -295,6 +295,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Command handler for /edit
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global telegram_app
     webhook_info = await telegram_app.bot.get_webhook_info()
     if webhook_info.pending_update_count > 0:
         logger.info(f"Pending updates found: {webhook_info.pending_update_count}. Returning 200 immediately.")
@@ -362,6 +363,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Initialize bot for each request
 async def initialize_bot():
+    global telegram_app
     if not TOKEN:
         logger.error("TELEGRAM_TOKEN is not set")
         raise ValueError("TELEGRAM_TOKEN is not set")
@@ -391,6 +393,7 @@ async def initialize_bot():
 # Webhook endpoint
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
+    global telegram_app
     try:
         telegram_app = await initialize_bot()
         update_json = await request.json()
