@@ -390,9 +390,9 @@ async def telegram_webhook(request: Request):
         update_json = await request.json()
         logger.info(f"Received update: {update_json}")
         update = Update.de_json(update_json, telegram_app.bot)
-        await telegram_app.process_update(update)
+        telegram_app.process_update(update)
         logger.info("Update processed successfully")
-        await telegram_app.shutdown()
+        telegram_app.shutdown()
         return Response(status_code=200)
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
