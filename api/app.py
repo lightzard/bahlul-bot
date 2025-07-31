@@ -378,8 +378,8 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await redis_client.close()
             logger.info("Redis client closed and 'is_editing' key deleted")
 
-# Command handler for /editFidelity
-async def editFidelity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Command handler for /editGood
+async def editGood(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global telegram_app
     webhook_info = await telegram_app.bot.get_webhook_info()
     if webhook_info.pending_update_count > 1:
@@ -394,10 +394,10 @@ async def editFidelity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_thread_id = update.message.message_thread_id
     caption = update.message.caption
     
-    logger.info(f"Received /editFidelity command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
+    logger.info(f"Received /editGood command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
     
     # Extract prompt from caption
-    prompt_start = len("/editFidelity@BahlulBot") if caption.lower().startswith("/editFidelity@bahlulbot") else len("/editFidelity")
+    prompt_start = len("/editGood@BahlulBot") if caption.lower().startswith("/editGood@bahlulbot") else len("/editGood")
     prompt = caption[prompt_start:].strip()
     photo = update.message.photo[-1]  # Get the highest resolution photo
     
@@ -436,7 +436,7 @@ async def editFidelity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image=image_file,
             prompt=prompt,
             n=1,
-            quality='low',
+            quality='auto',
             size='1024x1024',
             input_fidelity='high'
         )
@@ -486,8 +486,8 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
     telegram_app.add_handler(MessageHandler(
-    filters.PHOTO & filters.CaptionRegex(re.compile(r'^/editFidelity(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
-    editFidelity))
+    filters.PHOTO & filters.CaptionRegex(re.compile(r'^/editGood(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
+    editGood))
     telegram_app.add_handler(MessageHandler(
     filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
     edit))
