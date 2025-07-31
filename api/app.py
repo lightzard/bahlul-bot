@@ -21,7 +21,7 @@ app = FastAPI()
 # Environment variables
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Added for OpenAI API
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")
 REDIS_URL = os.getenv("REDIS_URL")
 
@@ -293,6 +293,76 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await redis_client.close()
             logger.info("Redis client closed for /generate")
 
+# Command handler for /draw
+async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        logger.info("Received /draw command with no message content")
+        return
+    
+    chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
+    message_thread_id = update.message.message_thread_id
+    prompt = ' '.join(context.args) if context.args else None
+    
+    logger.info(f"Received /draw command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, prompt: {prompt}")
+    
+    if not prompt:
+        reply_params = {"text": "Please provide a description after /draw (e.g., /draw A cute baby sea otter)"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent empty prompt warning")
+        return
+    
+    redis_client = None
+    try:
+        # Initialize Redis client
+        redis_client = await init_redis()
+        # Initialize OpenAI client
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        # Get conversation history
+        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
+        conversation = await get_conversation_history(redis_client, conversation_key)
+        conversation.append({"role": "user", "content": f"/draw {prompt}"})
+        
+        # Generate image using OpenAI
+        response = await openai_client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            n=1,
+            size="1024x1024",
+            quality="low",
+            response_format="b64_json",
+            moderation="low"
+        )
+        
+        image_base64 = response.data[0].b64_json
+        image_bytes = base64.b64decode(image_base64)
+        
+        logger.info(f"Generated image with prompt: {prompt}")
+        
+        # Save to conversation history
+        conversation.append({"role": "assistant", "content": f"Generated image with prompt: {prompt}"})
+        await save_conversation_history(redis_client, conversation_key, conversation)
+        
+        # Send image to Telegram
+        reply_params = {"photo": image_bytes}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_photo(**reply_params)
+        logger.info(f"Sent image to Telegram (base64 length: {len(image_base64)})")
+    except Exception as e:
+        logger.error(f"Error processing /draw command: {str(e)}")
+        reply_params = {"text": f"Error generating image: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent error message to Telegram")
+    finally:
+        if redis_client:
+            await redis_client.close()
+            logger.info("Redis client closed for /draw")
+
 # Command handler for /edit
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global telegram_app
@@ -485,6 +555,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
+    telegram_app.add_handler(CommandHandler("draw", draw))
     telegram_app.add_handler(MessageHandler(
     filters.PHOTO & filters.CaptionRegex(re.compile(r'^/editGood(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
     editGood))
