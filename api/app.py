@@ -304,40 +304,12 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Received /edit command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
     
-    # Check if caption starts with /edit or /edit@BahlulBot
-    if not caption or not re.match(r'^/edit(@BahlulBot)?\b', caption, re.IGNORECASE):
-        reply_params = {"text": "Please provide a caption starting with /edit or /edit@BahlulBot followed by the edit instruction (e.g., /edit Change the background to a beach)"}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        await update.message.reply_text(**reply_params)
-        logger.info("Sent invalid caption warning")
-        return
-    
     # Extract prompt from caption
     prompt_start = len("/edit@BahlulBot") if caption.lower().startswith("/edit@bahlulbot") else len("/edit")
     prompt = caption[prompt_start:].strip()
-    if not prompt:
-        reply_params = {"text": "Please provide an edit instruction after /edit or /edit@BahlulBot in the caption (e.g., /edit Change the background to a beach)"}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        await update.message.reply_text(**reply_params)
-        logger.info("Sent empty prompt warning")
-        return
-
-    # Check for photos in the message
-    if not update.message.photo:
-        reply_params = {"text": "Please attach at least one photo with the /edit or /edit@BahlulBot caption to edit."}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        await update.message.reply_text(**reply_params)
-        logger.info("Sent missing photo warning")
-        return
-    
     photo = update.message.photo[-1]  # Get the highest resolution photo
     
-    redis_client = None
     try:
-        redis_client = await init_redis()
         openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         
         # Get the photo file
@@ -381,10 +353,6 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
         logger.info("Sent error message to Telegram")
-    finally:
-        if redis_client:
-            await redis_client.close()
-            logger.info("Redis client closed for /edit")
 
 # Initialize bot for each request
 async def initialize_bot():
