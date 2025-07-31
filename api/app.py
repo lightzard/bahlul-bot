@@ -333,6 +333,8 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("Sent missing photo warning")
         return
     
+    photo = update.message.photo[-1]  # Get the highest resolution photo
+    
     redis_client = None
     try:
         redis_client = await init_redis()
@@ -341,26 +343,28 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": f"/edit {prompt}"})
 
-        # Process multiple photos
-        images = []
-        for photo in update.message.photo:
-            file = await photo.get_file()
-            file_url = file.file_path
-            async with aiohttp.ClientSession() as session:
-                async with session.get(file_url) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"Failed to download image: HTTP {resp.status}")
-                    image_data = await resp.read()
-                    image_file = io.BytesIO(image_data)
-                    image_file.name = f"image_{photo.file_id}.png"
-                    images.append(image_file)
+        # Get the photo file
+        file = await photo.get_file()
+        file_url = file.file_path
+
+        # Download the image
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Failed to download image: HTTP {resp.status}")
+                image_data = await resp.read()
+
+        image_file = io.BytesIO(image_data)
+        image_file.name = "image.png"
 
         # Make request to OpenAI Image Edit API
         # Note: OpenAI's edit API typically processes one image, but we'll use the first one for compatibility
         response = await openai_client.images.edit(
             model="gpt-image-1",
-            image=images[0],  # Use the first image, as per OpenAI's API
-            prompt=prompt
+            image=image_file,  # Use the first image, as per OpenAI's API
+            prompt=prompt,
+            n=1,
+            input_fidelity='high'
         )
         
         image_base64 = response.data[0].b64_json
