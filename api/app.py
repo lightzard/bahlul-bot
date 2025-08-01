@@ -24,6 +24,7 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")
 REDIS_URL = os.getenv("REDIS_URL")
+WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",") if os.getenv("WHITELIST_IDS") else []
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -31,9 +32,21 @@ logger = logging.getLogger(__name__)
 
 telegram_app = None
 
+# Function to check if chat_id or user_id is in whitelist
+def is_whitelisted(chat_id: int, user_id: int) -> bool:
+    whitelisted = str(chat_id) in WHITELIST_IDS or str(user_id) in WHITELIST_IDS
+    logger.info(f"Checking whitelist: chat_id={chat_id}, user_id={user_id}, whitelisted={whitelisted}")
+    return whitelisted
+
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Received /start command")
+    chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
     await update.message.reply_text("Hello! I'm BahlulBot, powered by Grok. Use /ask <your question> to get a response, or send a message in private chat.")
     logger.info("Sent /start response")
 
@@ -45,8 +58,14 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_type = update.message.chat.type
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
     query = ' '.join(context.args) if context.args else None
+    
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
     
     logger.info(f"Received /ask command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, query: {query}")
     
@@ -119,7 +138,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = update.message.text
     chat_type = update.message.chat.type
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
+    
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
+    
     logger.info(f"Processing message from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}: {message_text}")
     
     redis_client = None
@@ -191,7 +217,7 @@ async def init_redis():
         # Create Redis client (rediss:// handles TLS automatically)
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         # Test connection
-        #await redis_client.ping()
+        # await redis_client.ping()
         logger.info("Successfully connected to Redis")
         return redis_client
     except Exception as e:
@@ -237,8 +263,14 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_type = update.message.chat.type
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
     prompt = ' '.join(context.args) if context.args else None
+    
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
     
     logger.info(f"Received /generate command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, prompt: {prompt}")
     
@@ -301,8 +333,14 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_type = update.message.chat.type
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
     prompt = ' '.join(context.args) if context.args else None
+    
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
     
     logger.info(f"Received /draw command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, prompt: {prompt}")
     
@@ -370,8 +408,14 @@ async def gooddraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_type = update.message.chat.type
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
     prompt = ' '.join(context.args) if context.args else None
+    
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
     
     logger.info(f"Received /gooddraw command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, prompt: {prompt}")
     
@@ -444,8 +488,14 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_type = update.message.chat.type
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
     caption = update.message.caption
+    
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
     
     logger.info(f"Received /edit command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
     
@@ -529,8 +579,14 @@ async def goodedit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_type = update.message.chat.type
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
     caption = update.message.caption
+    
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
     
     logger.info(f"Received /goodedit command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
     
@@ -625,12 +681,8 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("generate", generate))
     telegram_app.add_handler(CommandHandler("draw", draw))
     telegram_app.add_handler(CommandHandler("gooddraw", gooddraw))
-    telegram_app.add_handler(MessageHandler(
-    filters.PHOTO & filters.CaptionRegex(re.compile(r'^/goodedit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
-    goodedit))
-    telegram_app.add_handler(MessageHandler(
-    filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
-    edit))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(re.compile(r'^/goodedit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,goodedit))
+    telegram_app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,edit))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot handlers added")
