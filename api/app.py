@@ -362,6 +362,75 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await redis_client.close()
             logger.info("Redis client closed for /draw")
 
+# Command handler for /gooddraw
+async def gooddraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        logger.info("Received /gooddraw command with no message content")
+        return
+    
+    chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
+    message_thread_id = update.message.message_thread_id
+    prompt = ' '.join(context.args) if context.args else None
+    
+    logger.info(f"Received /gooddraw command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, prompt: {prompt}")
+    
+    if not prompt:
+        reply_params = {"text": "Please provide a description after /gooddraw (e.g., /gooddraw A cute baby sea otter)"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent empty prompt warning")
+        return
+    
+    redis_client = None
+    try:
+        # Initialize Redis client
+        redis_client = await init_redis()
+        # Initialize OpenAI client
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        # Get conversation history
+        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
+        conversation = await get_conversation_history(redis_client, conversation_key)
+        conversation.append({"role": "user", "content": f"/gooddraw {prompt}"})
+        
+        # Generate image using OpenAI
+        response = await openai_client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            n=1,
+            size="1024x1024",
+            quality="auto",
+            moderation="low"
+        )
+        
+        image_base64 = response.data[0].b64_json
+        image_bytes = base64.b64decode(image_base64)
+        
+        logger.info(f"Generated image with prompt: {prompt}")
+        
+        # Save to conversation history
+        conversation.append({"role": "assistant", "content": f"Generated image with prompt: {prompt}"})
+        await save_conversation_history(redis_client, conversation_key, conversation)
+        
+        # Send image to Telegram
+        reply_params = {"photo": image_bytes}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_photo(**reply_params)
+        logger.info(f"Sent image to Telegram (base64 length: {len(image_base64)})")
+    except Exception as e:
+        logger.error(f"Error processing /gooddraw command: {str(e)}")
+        reply_params = {"text": f"Error generating image: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent error message to Telegram")
+    finally:
+        if redis_client:
+            await redis_client.close()
+            logger.info("Redis client closed for /gooddraw")
+
 # Command handler for /edit
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global telegram_app
@@ -447,8 +516,8 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await redis_client.close()
             logger.info("Redis client closed and 'is_editing' key deleted")
 
-# Command handler for /editGood
-async def editGood(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Command handler for /goodedit
+async def goodedit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global telegram_app
     webhook_info = await telegram_app.bot.get_webhook_info()
     if webhook_info.pending_update_count > 1:
@@ -463,10 +532,10 @@ async def editGood(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_thread_id = update.message.message_thread_id
     caption = update.message.caption
     
-    logger.info(f"Received /editGood command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
+    logger.info(f"Received /goodedit command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, caption: {caption}")
     
     # Extract prompt from caption
-    prompt_start = len("/editGood@BahlulBot") if caption.lower().startswith("/editGood@bahlulbot") else len("/editGood")
+    prompt_start = len("/goodedit@BahlulBot") if caption.lower().startswith("/goodedit@bahlulbot") else len("/goodedit")
     prompt = caption[prompt_start:].strip()
     photo = update.message.photo[-1]  # Get the highest resolution photo
     
@@ -555,9 +624,10 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("generate", generate))
     telegram_app.add_handler(CommandHandler("draw", draw))
+    telegram_app.add_handler(CommandHandler("gooddraw", gooddraw))
     telegram_app.add_handler(MessageHandler(
-    filters.PHOTO & filters.CaptionRegex(re.compile(r'^/editGood(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
-    editGood))
+    filters.PHOTO & filters.CaptionRegex(re.compile(r'^/goodedit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
+    goodedit))
     telegram_app.add_handler(MessageHandler(
     filters.PHOTO & filters.CaptionRegex(re.compile(r'^/edit(@BahlulBot)?\b.*', re.IGNORECASE)) & ~filters.VIA_BOT,
     edit))
