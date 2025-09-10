@@ -6,7 +6,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class MessageHandler(BaseHandler):
+class TextMessageHandler(BaseHandler):
     """Handler for general text messages"""
     
     async def _process_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE,

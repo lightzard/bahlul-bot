@@ -4,7 +4,7 @@ from typing import Optional
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from .config import Config
-from .handlers import StartHandler, AskHandler, MessageHandler, GenerateHandler, DrawHandler, EditHandler
+from .handlers import StartHandler, AskHandler, TextMessageHandler, GenerateHandler, DrawHandler, EditHandler
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class BotManager:
             # Initialize handler instances
             start_handler = StartHandler()
             ask_handler = AskHandler()
-            message_handler = MessageHandler()
+            message_handler = TextMessageHandler()
             generate_handler = GenerateHandler()
             
             # Initialize draw handlers
