@@ -8,8 +8,6 @@ import redis.asyncio as redis
 import json
 from urllib.parse import urlparse
 from xai_sdk import Client
-from xai_sdk.chat import user, system, assistant
-from xai_sdk.search import SearchParameters
 import re
 import aiohttp  # For downloading the image file
 from openai import AsyncOpenAI  # For OpenAI async client
@@ -22,7 +20,9 @@ app = FastAPI()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GROK_MODEL = os.getenv("GROK_MODEL", "grok-3-mini-fast")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 REDIS_URL = os.getenv("REDIS_URL")
 WHITELIST_IDS = os.getenv("WHITELIST_IDS", "").split(",") if os.getenv("WHITELIST_IDS") else []
 
@@ -38,6 +38,30 @@ def is_whitelisted(chat_id: int, user_id: int) -> bool:
     logger.info(f"Checking whitelist: chat_id={chat_id}, user_id={user_id}, whitelisted={whitelisted}")
     return whitelisted
 
+# Get a chat response from the DeepSeek API using conversation history
+async def get_deepseek_response(conversation: list) -> str:
+    if not DEEPSEEK_API_KEY:
+        raise ValueError("DEEPSEEK_API_KEY is not set")
+    client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    # Build OpenAI-compatible messages from history
+    messages = []
+    for msg in conversation:
+        if msg["role"] == "system":
+            if isinstance(msg["content"], list):
+                text = " ".join(part.get("text", "") for part in msg["content"] if isinstance(part, dict))
+                messages.append({"role": "system", "content": text})
+            else:
+                messages.append({"role": "system", "content": msg["content"]})
+        else:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+    # Add output limit instruction without persisting it to history
+    messages.append({"role": "system", "content": "Your maximum output is 4096 characters."})
+    response = await client.chat.completions.create(
+        model=DEEPSEEK_MODEL,
+        messages=messages
+    )
+    return response.choices[0].message.content
+
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("Received /start command")
@@ -47,7 +71,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
-    await update.message.reply_text("Hello! I'm BahlulBot, powered by Grok. Use /ask <your question> to get a response, or send a message in private chat.")
+    await update.message.reply_text("Hello! I'm BahlulBot, powered by DeepSeek. Use /ask <your question> to get a response, or send a message in private chat.")
     logger.info("Sent /start response")
 
 # Command handler for /ask
@@ -81,43 +105,25 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Initialize Redis client for this request
         redis_client = await init_redis()
-        # Initialize xAI SDK client
-        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": query})
-        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
 
-        # Create chat session with search parameters
-        chat = xai_client.chat.create(
-            model=GROK_MODEL,
-            search_parameters=SearchParameters(mode="auto")
-        )
-        for msg in conversation:
-            if msg["role"] == "user":
-                chat.append(user(msg["content"]))
-            elif msg["role"] == "system":
-                chat.append(system(msg["content"][0]["text"]))
-            elif msg["role"] == "assistant":
-                chat.append(assistant(msg["content"]))
-
-        # Call Grok API with history
-        response = chat.sample()
-        grok_response = response.content
-        conversation.pop()
-        logger.info(f"Got response from Grok: {grok_response}")
+        # Call DeepSeek API with history
+        deepseek_response = await get_deepseek_response(conversation)
+        logger.info(f"Got response from DeepSeek: {deepseek_response}")
         
         # Save to conversation history
-        conversation.append({"role": "assistant", "content": grok_response})
+        conversation.append({"role": "assistant", "content": deepseek_response})
         await save_conversation_history(redis_client, conversation_key, conversation)
         
         # Reply to Telegram
-        reply_params = {"text": grok_response}
+        reply_params = {"text": deepseek_response}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
-        logger.info(f"Sent response to Telegram: {grok_response}")
+        logger.info(f"Sent response to Telegram: {deepseek_response}")
     except Exception as e:
         logger.error(f"Error processing /ask command: {str(e)}")
         reply_params = {"text": f"Error processing your request: {str(e)}"}
@@ -152,43 +158,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Initialize Redis client for this request
         redis_client = await init_redis()
-        # Initialize xAI SDK client
-        xai_client = Client(api_key=GROK_API_KEY, timeout=3600)
         # Get conversation history
         conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
         conversation = await get_conversation_history(redis_client, conversation_key)
         conversation.append({"role": "user", "content": message_text})
-        conversation.append({"role": "system", "content": [{"type": "text","text": "Your maximum output is 4096 characters."}]})
 
-        # Create chat session with search parameters
-        chat = xai_client.chat.create(
-            model=GROK_MODEL,
-            search_parameters=SearchParameters(mode="auto")
-        )
-        for msg in conversation:
-            if msg["role"] == "user":
-                chat.append(user(msg["content"]))
-            elif msg["role"] == "system":
-                chat.append(system(msg["content"][0]["text"]))
-            elif msg["role"] == "assistant":
-                chat.append(assistant(msg["content"]))
-
-        # Call Grok API with history
-        response = chat.sample()
-        grok_response = response.content
-        conversation.pop()
-        logger.info(f"Got response from Grok: {grok_response}")
+        # Call DeepSeek API with history
+        deepseek_response = await get_deepseek_response(conversation)
+        logger.info(f"Got response from DeepSeek: {deepseek_response}")
         
         # Save to conversation history
-        conversation.append({"role": "assistant", "content": grok_response})
+        conversation.append({"role": "assistant", "content": deepseek_response})
         await save_conversation_history(redis_client, conversation_key, conversation)
         
         # Reply to Telegram
-        reply_params = {"text": grok_response}
+        reply_params = {"text": deepseek_response}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
-        logger.info(f"Sent response to Telegram: {grok_response}")
+        logger.info(f"Sent response to Telegram: {deepseek_response}")
     except Exception as e:
         logger.error(f"Error processing message: {str(e)}")
         reply_params = {"text": f"Error processing your request: {str(e)}"}

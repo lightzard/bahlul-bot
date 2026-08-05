@@ -1,14 +1,15 @@
 # BahlulBot
 
-BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and hosted on Vercel. It responds to user messages and commands in private and group chats, leveraging the Grok API via the xAI SDK for intelligent responses. The bot supports conversation context, maintaining a history of interactions to provide coherent responses.
+BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with FastAPI and hosted on Vercel. It responds to user messages and commands in private and group chats, leveraging the DeepSeek API (OpenAI-compatible) for intelligent responses. The bot also supports image generation via xAI's Grok image model and image editing/drawing via OpenAI. The bot supports conversation context, maintaining a history of interactions to provide coherent responses.
 
 ## Features
 
 - **Command Handling**: Responds to `/start` and `/ask <question>` commands in private and group chats.
 - **Text Message Handling**: Processes regular text messages in private chats and group chats (if privacy mode is disabled and the bot is an admin).
-- **Conversation Context**: Stores up to 10 messages per chat (private or group, including topic threads) in a Redis database with a 1-hour expiry, enabling contextual responses from the Grok API.
+- **Conversation Context**: Stores up to 10 messages per chat (private or group, including topic threads) in a Redis database with a 1-hour expiry, enabling contextual responses from the DeepSeek API.
 - **Webhook-Based**: Uses FastAPI to handle Telegram webhook updates, optimized for Vercel’s serverless environment.
-- **Grok API Integration**: Powered by xAI’s Grok API (default model: `grok-4`) via the xAI SDK for generating responses.
+- **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-v4-flash-0731`) for generating chat responses.
+- **xAI Image Generation**: Uses xAI's Grok image model (`grok-2-image`) via the xAI SDK for the `/generate` command.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
 
 ## Requirements
@@ -16,15 +17,20 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
 ### Dependencies
 - `fastapi`: For building the webhook-based API.
 - `python-telegram-bot>=20.0`: For interacting with the Telegram Bot API.
-- `httpx`: For asynchronous HTTP requests (used internally by xAI SDK).
+- `httpx`: For asynchronous HTTP requests (used internally by SDKs).
 - `uvicorn`: For running the FastAPI application.
 - `redis`: For storing conversation history in a Redis database.
-- `xai-sdk`: For interacting with the Grok API.
+- `openai`: For chat via the DeepSeek API (OpenAI-compatible) and for OpenAI image commands.
+- `aiohttp`: For downloading image files during image editing.
+- `xai-sdk`: For xAI Grok image generation (`/generate`).
 
 ### Environment Variables
 - `TELEGRAM_TOKEN`: Your Telegram bot token from `@BotFather`.
-- `GROK_API_KEY`: Your xAI Grok API key (see https://x.ai/api for details).
-- `GROK_MODEL`: The Grok model to use (default: `grok-3-mini-fast`).
+- `DEEPSEEK_API_KEY`: Your DeepSeek API key (see https://platform.deepseek.com for details).
+- `DEEPSEEK_MODEL`: The DeepSeek model to use for chat (default: `deepseek-v4-flash-0731`).
+- `DEEPSEEK_BASE_URL`: Optional DeepSeek API base URL (default: `https://api.deepseek.com`).
+- `GROK_API_KEY`: Your xAI Grok API key, required for `/generate` image generation (see https://x.ai/api for details).
+- `OPENAI_API_KEY`: Your OpenAI API key, required for `/draw`, `/gooddraw`, `/edit`, and `/goodedit`.
 - `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash).
 
 ## Setup Instructions
@@ -40,15 +46,17 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
    ```bash
    pip install -r api/requirements.txt
    ```
-   The `requirements.txt` should contain:
-   ```
-   fastapi
-   python-telegram-bot>=20.0
-   httpx
-   uvicorn
-   redis
-   xai-sdk==1.0.1
-   ```
+    The `requirements.txt` should contain:
+    ```
+    fastapi
+    python-telegram-bot>=20.0
+    httpx
+    uvicorn
+    redis
+    xai-sdk==1.0.1
+    aiohttp
+    openai
+    ```
 
 3. **Set Up a Redis Instance**
    - Sign up for a free Redis database at https://upstash.com/.
@@ -57,11 +65,14 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
 
 4. **Configure Environment Variables**
    - In Vercel, go to Dashboard > Project > Settings > Environment Variables.
-   - Add:
-     - `TELEGRAM_TOKEN`: Your bot token from `@BotFather`.
-     - `GROK_API_KEY`: Your Grok API key.
-     - `GROK_MODEL`: Set to `grok-4` (or another valid model; see https://x.ai/api).
-     - `REDIS_URL`: The Redis connection URL from Upstash.
+    - Add:
+      - `TELEGRAM_TOKEN`: Your bot token from `@BotFather`.
+      - `DEEPSEEK_API_KEY`: Your DeepSeek API key.
+      - `DEEPSEEK_MODEL`: Set to `deepseek-v4-flash-0731` (or another valid DeepSeek model; see https://platform.deepseek.com).
+      - `DEEPSEEK_BASE_URL`: Optional; defaults to `https://api.deepseek.com`.
+      - `GROK_API_KEY`: Your xAI Grok API key (required for `/generate`).
+      - `OPENAI_API_KEY`: Your OpenAI API key (required for `/draw`, `/gooddraw`, `/edit`, `/goodedit`).
+      - `REDIS_URL`: The Redis connection URL from Upstash.
 
 5. **Deploy to Vercel**
    - Connect your GitHub repository to Vercel.
@@ -128,8 +139,14 @@ BahlulBot is a Telegram bot powered by the Grok API, built with FastAPI and host
   - Verify Redis data in Upstash Dashboard.
   - Ensure `REDIS_URL` is correct.
 
-- **Grok API Issues**:
-  - Verify `GROK_API_KEY` and `GROK_MODEL` (see https://x.ai/api).
+- **DeepSeek API Issues**:
+  - Verify `DEEPSEEK_API_KEY` and `DEEPSEEK_MODEL` (see https://platform.deepseek.com).
+  - Check logs for errors from DeepSeek interactions (look for `Error processing /ask command` or `Error processing message`).
+  - If you see a model-not-found error, confirm `deepseek-v4-flash-0731` is enabled for your account, or override `DEEPSEEK_MODEL` with a valid model ID.
+  - Ensure `openai` is installed (`pip show openai`).
+
+- **Grok Image Generation Issues** (`/generate`):
+  - Verify `GROK_API_KEY` (see https://x.ai/api).
   - Check logs for errors from xAI SDK interactions.
   - Ensure `xai-sdk` is installed (`pip show xai-sdk` should show version `1.0.1`).
 
