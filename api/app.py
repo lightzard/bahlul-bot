@@ -13,6 +13,13 @@ import aiohttp  # For downloading the image file
 from openai import AsyncOpenAI  # For OpenAI async client
 import base64  # For encoding/decoding image data
 import io
+from api.web_search import (
+    format_search_context,
+    needs_web_search,
+    search_web,
+    WEB_SEARCH_AUTO_ENABLED,
+    TAVILY_API_KEY,
+)
 
 app = FastAPI()
 
@@ -39,7 +46,7 @@ def is_whitelisted(chat_id: int, user_id: int) -> bool:
     return whitelisted
 
 # Get a chat response from the DeepSeek API using conversation history
-async def get_deepseek_response(conversation: list) -> str:
+async def get_deepseek_response(conversation: list, web_context: str | None = None) -> str:
     if not DEEPSEEK_API_KEY:
         raise ValueError("DEEPSEEK_API_KEY is not set")
     client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
@@ -56,11 +63,91 @@ async def get_deepseek_response(conversation: list) -> str:
             messages.append({"role": msg["role"], "content": msg["content"]})
     # Add output limit instruction without persisting it to history
     messages.append({"role": "system", "content": "Your maximum output is 4096 characters."})
+    # Add live web search context when available. This is injected per-request and
+    # never persisted to conversation history, preventing stale evidence reuse.
+    if web_context:
+        messages.append({"role": "system", "content": web_context})
     response = await client.chat.completions.create(
         model=DEEPSEEK_MODEL,
         messages=messages
     )
     return response.choices[0].message.content
+
+
+# Shared chat-query pipeline with optional live web search
+async def process_chat_query(
+    update: Update,
+    query: str,
+    *,
+    force_web_search: bool = False,
+) -> None:
+    """Handle a user query with automatic or forced web-search grounding."""
+    chat_type = update.message.chat.type
+    chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
+    message_thread_id = update.message.message_thread_id
+
+    logger.info(
+        f"Processing query from chat type {chat_type}, chat ID: {chat_id}, "
+        f"thread ID: {message_thread_id}, force_web_search={force_web_search}: {query}"
+    )
+
+    redis_client = None
+    try:
+        # Initialize Redis client for this request
+        redis_client = await init_redis()
+        # Get conversation history
+        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
+        conversation = await get_conversation_history(redis_client, conversation_key)
+        conversation.append({"role": "user", "content": query})
+
+        # Decide whether to perform a live web search.
+        web_context = None
+        if TAVILY_API_KEY and (force_web_search or (WEB_SEARCH_AUTO_ENABLED and needs_web_search(query))):
+            logger.info(f"Triggering web search for query: {query}")
+            outcome = await search_web(query, redis_client, user_id)
+            if outcome.ok:
+                web_context = format_search_context(query, outcome.results)
+                logger.info(
+                    f"Web search returned {len(outcome.results)} results (from_cache={outcome.from_cache})"
+                )
+            else:
+                # Search failed (quota, timeout, provider error). Tell the LLM to
+                # clearly disclose that current information could not be verified.
+                web_context = (
+                    "## Live search context\n"
+                    "Live web search was attempted but could not be completed.\n"
+                    "Clearly state that you could not verify current information, "
+                    "and do not invent facts or dates."
+                )
+                logger.warning(f"Web search failed, will disclose limitation: {outcome.error}")
+
+        # Call DeepSeek with history and grounding context.
+        deepseek_response = await get_deepseek_response(conversation, web_context=web_context)
+        logger.info(f"Got response from DeepSeek: {deepseek_response}")
+
+        # Save only user query and assistant answer to history; grounding is ephemeral.
+        conversation.append({"role": "assistant", "content": deepseek_response})
+        await save_conversation_history(redis_client, conversation_key, conversation)
+
+        # Reply to Telegram
+        reply_params = {"text": deepseek_response}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info(f"Sent response to Telegram: {deepseek_response}")
+    except Exception as e:
+        logger.error(f"Error processing query: {str(e)}")
+        reply_params = {"text": f"Error processing your request: {str(e)}"}
+        if message_thread_id:
+            reply_params["message_thread_id"] = message_thread_id
+        await update.message.reply_text(**reply_params)
+        logger.info("Sent error message to Telegram")
+    finally:
+        if redis_client:
+            await redis_client.close()
+            logger.info("Redis client closed for query")
+
 
 # Command handler for /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -71,7 +158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
-    await update.message.reply_text("Hello! I'm BahlulBot, powered by DeepSeek. Use /ask <your question> to get a response, or send a message in private chat.")
+    await update.message.reply_text("Hello! I'm BahlulBot, powered by DeepSeek. Use /ask <your question> to get a response, /web <your question> to force a live web search, or send a message in private chat.")
     logger.info("Sent /start response")
 
 # Command handler for /ask
@@ -79,20 +166,19 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message is None:
         logger.info("Received /ask command with no message content")
         return
-    
-    chat_type = update.message.chat.type
+
     chat_id = update.message.chat.id
     user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
     query = ' '.join(context.args) if context.args else None
-    
+
     if not is_whitelisted(chat_id, user_id):
         logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
-    
-    logger.info(f"Received /ask command from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}, query: {query}")
-    
+
+    logger.info(f"Received /ask command from chat ID: {chat_id}, thread ID: {message_thread_id}, query: {query}")
+
     if not query:
         reply_params = {"text": "Please provide a question after /ask (e.g., /ask What is the capital of France?)"}
         if message_thread_id:
@@ -100,41 +186,45 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(**reply_params)
         logger.info("Sent empty query warning")
         return
-    
-    redis_client = None
-    try:
-        # Initialize Redis client for this request
-        redis_client = await init_redis()
-        # Get conversation history
-        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
-        conversation = await get_conversation_history(redis_client, conversation_key)
-        conversation.append({"role": "user", "content": query})
 
-        # Call DeepSeek API with history
-        deepseek_response = await get_deepseek_response(conversation)
-        logger.info(f"Got response from DeepSeek: {deepseek_response}")
-        
-        # Save to conversation history
-        conversation.append({"role": "assistant", "content": deepseek_response})
-        await save_conversation_history(redis_client, conversation_key, conversation)
-        
-        # Reply to Telegram
-        reply_params = {"text": deepseek_response}
+    # Delegate to the shared chat pipeline (includes automatic web search).
+    await process_chat_query(update, query)
+
+# Command handler for /web - force live web search
+async def web(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message is None:
+        logger.info("Received /web command with no message content")
+        return
+
+    chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
+    message_thread_id = update.message.message_thread_id
+    query = ' '.join(context.args) if context.args else None
+
+    if not is_whitelisted(chat_id, user_id):
+        logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
+
+    logger.info(f"Received /web command from chat ID: {chat_id}, thread ID: {message_thread_id}, query: {query}")
+
+    if not query:
+        reply_params = {"text": "Please provide a question after /web (e.g., /web What is the latest Python version?)"}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
-        logger.info(f"Sent response to Telegram: {deepseek_response}")
-    except Exception as e:
-        logger.error(f"Error processing /ask command: {str(e)}")
-        reply_params = {"text": f"Error processing your request: {str(e)}"}
+        logger.info("Sent empty web query warning")
+        return
+
+    if not TAVILY_API_KEY:
+        reply_params = {"text": "Live web search is not configured. Please set TAVILY_API_KEY."}
         if message_thread_id:
             reply_params["message_thread_id"] = message_thread_id
         await update.message.reply_text(**reply_params)
-        logger.info("Sent error message to Telegram")
-    finally:
-        if redis_client:
-            await redis_client.close()
-            logger.info("Redis client closed for /ask")
+        logger.info("Sent missing TAVILY_API_KEY warning")
+        return
+
+    await process_chat_query(update, query, force_web_search=True)
 
 # Message handler for text messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,52 +232,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info("Received update with no message content")
         return
     message_text = update.message.text
-    chat_type = update.message.chat.type
     chat_id = update.message.chat.id
     user_id = update.message.from_user.id
     message_thread_id = update.message.message_thread_id
-    
+
     if not is_whitelisted(chat_id, user_id):
         logger.info(f"Unauthorized access attempt: chat_id={chat_id}, user_id={user_id}")
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
-    
-    logger.info(f"Processing message from chat type {chat_type}, chat ID: {chat_id}, thread ID: {message_thread_id}: {message_text}")
-    
-    redis_client = None
-    try:
-        # Initialize Redis client for this request
-        redis_client = await init_redis()
-        # Get conversation history
-        conversation_key = f"chat:{chat_id}:{message_thread_id or 'main'}"
-        conversation = await get_conversation_history(redis_client, conversation_key)
-        conversation.append({"role": "user", "content": message_text})
 
-        # Call DeepSeek API with history
-        deepseek_response = await get_deepseek_response(conversation)
-        logger.info(f"Got response from DeepSeek: {deepseek_response}")
-        
-        # Save to conversation history
-        conversation.append({"role": "assistant", "content": deepseek_response})
-        await save_conversation_history(redis_client, conversation_key, conversation)
-        
-        # Reply to Telegram
-        reply_params = {"text": deepseek_response}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        await update.message.reply_text(**reply_params)
-        logger.info(f"Sent response to Telegram: {deepseek_response}")
-    except Exception as e:
-        logger.error(f"Error processing message: {str(e)}")
-        reply_params = {"text": f"Error processing your request: {str(e)}"}
-        if message_thread_id:
-            reply_params["message_thread_id"] = message_thread_id
-        await update.message.reply_text(**reply_params)
-        logger.info("Sent error message to Telegram")
-    finally:
-        if redis_client:
-            await redis_client.close()
-            logger.info("Redis client closed for handle_message")
+    logger.info(f"Received message from chat ID: {chat_id}, thread ID: {message_thread_id}: {message_text}")
+
+    # Delegate to the shared chat pipeline (includes automatic web search).
+    await process_chat_query(update, message_text)
 
 # Initialize Redis client
 async def init_redis():
@@ -666,6 +723,7 @@ async def initialize_bot():
     # Add handlers
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
+    telegram_app.add_handler(CommandHandler("web", web))
     telegram_app.add_handler(CommandHandler("generate", generate))
     telegram_app.add_handler(CommandHandler("draw", draw))
     telegram_app.add_handler(CommandHandler("gooddraw", gooddraw))

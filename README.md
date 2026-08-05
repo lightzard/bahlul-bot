@@ -9,6 +9,7 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 - **Conversation Context**: Stores up to 10 messages per chat (private or group, including topic threads) in a Redis database with a 1-hour expiry, enabling contextual responses from the DeepSeek API.
 - **Webhook-Based**: Uses FastAPI to handle Telegram webhook updates, optimized for Vercel’s serverless environment.
 - **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-v4-flash-0731`) for generating chat responses.
+- **Live Web Search**: Selectively augments freshness-sensitive questions (news, weather, prices, latest versions, etc.) with Tavily search results, cached in Redis and capped by a per-user daily quota. Use `/web <question>` to force a live search.
 - **xAI Image Generation**: Uses xAI's Grok image model (`grok-2-image`) via the xAI SDK for the `/generate` command.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
 
@@ -32,6 +33,13 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 - `GROK_API_KEY`: Your xAI Grok API key, required for `/generate` image generation (see https://x.ai/api for details).
 - `OPENAI_API_KEY`: Your OpenAI API key, required for `/draw`, `/gooddraw`, `/edit`, and `/goodedit`.
 - `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash).
+- `TAVILY_API_KEY`: Your Tavily API key, required to enable live web search (see https://www.tavily.com). Optional—chat works without it, but automatic recency search is disabled.
+- `WEB_SEARCH_AUTO_ENABLED`: Set to `false` to disable automatic recency-triggered searches (default: `true`). `/web` still works when the key is set.
+- `WEB_SEARCH_MAX_RESULTS`: Number of search results to fetch and inject (default: `5`).
+- `WEB_SEARCH_CACHE_TTL_SECONDS`: How long search results are cached in Redis (default: `600`).
+- `WEB_SEARCH_DAILY_LIMIT`: Maximum uncached live searches per user per UTC day (default: `50`).
+- `WEB_SEARCH_TIMEOUT_SECONDS`: Timeout for each Tavily request (default: `8`).
+- `WEB_SEARCH_CONTEXT_MAX_CHARS`: Cap for the search context injected into DeepSeek (default: `8000`).
 
 ## Setup Instructions
 
@@ -73,6 +81,7 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
       - `GROK_API_KEY`: Your xAI Grok API key (required for `/generate`).
       - `OPENAI_API_KEY`: Your OpenAI API key (required for `/draw`, `/gooddraw`, `/edit`, `/goodedit`).
       - `REDIS_URL`: The Redis connection URL from Upstash.
+      - `TAVILY_API_KEY`: (Optional) Your Tavily API key for live web search (https://www.tavily.com). Automatic recency search is disabled if omitted.
 
 5. **Deploy to Vercel**
    - Connect your GitHub repository to Vercel.
@@ -94,24 +103,81 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
      - Expected: “The capital of France is Paris.”
      - Send: `What is its population?`
      - Expected: “~2.2 million” (context preserved via Redis).
+     - Send: `/ask What is the latest Python version?`
+     - Expected: A current answer with numbered sources like `[1]` and a `Sources:` list (triggers live web search).
+     - Send: `/web What is happening in the news today?`
+     - Expected: A forced live-search answer regardless of automatic detection.
    - **Group Chat** (with privacy mode off and bot as admin):
      - Send: `/ask What is AI?`
      - Expected: “AI is…”
      - Send: `hello`
      - Expected: A response using context from previous messages (context preserved via Redis).
 
-8. **Verify Redis Data**
-   - Use Upstash Dashboard or CLI:
-     ```bash
-     upstash redis keys chat:*
-     upstash redis get chat:<chat_id>:main
-     ```
-     - Expected: JSON like `[{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}, ...]`.
-   - Check Vercel logs:
-     ```bash
-     vercel logs <your-app>.vercel.app
-     ```
-     - Look for: `Successfully connected to Redis`, `Saved conversation history for chat:...`.
+## Live Web Search (Cost Controls)
+
+Web search is intentionally **selective** to keep costs near zero:
+
+- **Local detection, no classifier**: A lightweight regex heuristic decides if a question needs fresh information. It covers English and Bahasa Indonesia across sports, weather, software, politics, and current-affairs domains, with explicit time markers (today, latest, current, hari ini, tadi malam, terbaru, saat ini, ...) taking priority over stable-knowledge guards. Stable questions like "What is the capital of France?" or "Apa itu inflasi?" make **zero** web-search requests.
+- **Basic search only**: Uses Tavily `search_depth: basic` with `include_answer: false` and `include_raw_content: false` to avoid premium token/pricing tiers.
+- **Compact context**: Only the top 5 results (title, URL, snippet, date) are injected, capped at `WEB_SEARCH_CONTEXT_MAX_CHARS` (default 8000), limiting DeepSeek input-token cost.
+- **Redis caching**: Identical queries within `WEB_SEARCH_CACHE_TTL_SECONDS` (default 600) reuse cached results with **no** extra Tavily call.
+- **Per-user daily quota**: `WEB_SEARCH_DAILY_LIMIT` (default 50) blocks unlimited uncached searches. Cached hits do not count against the quota.
+- **Graceful fallback**: Missing key, quota exhaustion, timeouts, or provider errors do not break chat. The bot clearly states it could not verify current information.
+- **Prompt-injection guard**: Snippets are injected as untrusted *evidence only*; the model is instructed never to follow instructions inside them.
+
+### Expected cost example
+
+At 10,000 messages/month with ~10% freshness-sensitive (1,000 searches), Tavily's free tier (1,000 credits/month) covers the search cost at **$0**. The only added cost is the extra DeepSeek tokens for the compact search context.
+
+### /web command
+
+Use `/web <question>` to force a live web search regardless of automatic detection, e.g.:
+
+```
+/web What is the current price of Bitcoin?
+```
+
+When search succeeds, answers include inline citations like `[1]` and end with a `Sources:` list of URLs.
+
+## Testing
+
+Run all mocked tests (no API keys or network required):
+
+```bash
+python test_chat.py
+```
+
+Run a real integration test against the DeepSeek API (requires `DEEPSEEK_API_KEY`):
+
+```bash
+python test_chat.py --live
+```
+
+Run a real integration test against the Tavily API (requires `TAVILY_API_KEY`, costs 1 credit):
+
+```bash
+# Windows (PowerShell)
+$env:TAVILY_API_KEY="<your-key>"; python test_chat.py --live-tavily
+
+# WSL / Linux / macOS
+TAVILY_API_KEY="<your-key>" python test_chat.py --live-tavily
+```
+
+This performs a single basic search for `"latest AI news today"`, prints the top 3 result titles and URLs, and exits with status code 0 on success.
+
+## Verify Redis Data
+
+- Use Upstash Dashboard or CLI:
+  ```bash
+  upstash redis keys chat:*
+  upstash redis get chat:<chat_id>:main
+  ```
+  - Expected: JSON like `[{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}, ...]`.
+- Check Vercel logs:
+  ```bash
+  vercel logs <your-app>.vercel.app
+  ```
+  - Look for: `Successfully connected to Redis`, `Saved conversation history for chat:...`.
 
 ## Troubleshooting
 
@@ -139,6 +205,14 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
   - Verify Redis data in Upstash Dashboard.
   - Ensure `REDIS_URL` is correct.
 
+- **Web Search Not Working**:
+  - Verify `TAVILY_API_KEY` is set in Vercel environment variables.
+  - Check logs for `Triggering web search` and `Web search failed` messages.
+  - Test the key locally with `curl -X POST https://api.tavily.com/search -H "Content-Type: application/json" -d '{"api_key":"<KEY>","query":"test","search_depth":"basic"}'`.
+- **Web Search Daily Limit Reached**:
+  - Logs will show `Web search daily limit reached for user <id>`.
+  - Raise `WEB_SEARCH_DAILY_LIMIT` to increase the per-user cap.
+  - Cached queries do not count toward the daily limit.
 - **DeepSeek API Issues**:
   - Verify `DEEPSEEK_API_KEY` and `DEEPSEEK_MODEL` (see https://platform.deepseek.com).
   - Check logs for errors from DeepSeek interactions (look for `Error processing /ask command` or `Error processing message`).
