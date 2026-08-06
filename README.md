@@ -8,7 +8,7 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 - **Text Message Handling**: Processes regular text messages in private chats and group chats (if privacy mode is disabled and the bot is an admin).
 - **Conversation Context**: Stores up to 10 messages per chat (private or group, including topic threads) in a Redis database with a 1-hour expiry, enabling contextual responses from the DeepSeek API.
 - **Webhook-Based**: Uses FastAPI to handle Telegram webhook updates, optimized for Vercel’s serverless environment.
-- **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-v4-flash-0731`) for generating chat responses.
+- **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-v4-flash`) for generating chat responses.
 - **Live Web Search**: Selectively augments freshness-sensitive questions (news, weather, prices, latest versions, etc.) with Tavily search results, cached in Redis and capped by a per-user daily quota. Use `/web <question>` to force a live search.
 - **xAI Image Generation**: Uses xAI's Grok image model (`grok-2-image`) via the xAI SDK for the `/generate` command.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
@@ -25,23 +25,31 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 - `aiohttp`: For downloading image files during image editing.
 - `xai-sdk`: For xAI Grok image generation (`/generate`).
 
-### Environment Variables
+### Secrets (Environment Variables)
+Only secrets are configured through environment variables; all other configuration lives in `api/settings.py`.
 - `TELEGRAM_TOKEN`: Your Telegram bot token from `@BotFather`.
 - `DEEPSEEK_API_KEY`: Your DeepSeek API key (see https://platform.deepseek.com for details).
-- `DEEPSEEK_MODEL`: The DeepSeek model to use for chat (default: `deepseek-v4-flash-0731`).
-- `DEEPSEEK_BASE_URL`: Optional DeepSeek API base URL (default: `https://api.deepseek.com`).
 - `GROK_API_KEY`: Your xAI Grok API key, required for `/generate` image generation (see https://x.ai/api for details).
 - `OPENAI_API_KEY`: Your OpenAI API key, required for `/draw`, `/gooddraw`, `/edit`, and `/goodedit`.
-- `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash).
 - `TAVILY_API_KEY`: Your Tavily API key, required to enable live web search (see https://www.tavily.com). Optional—chat works without it, but automatic recency search is disabled.
-- `WEB_SEARCH_AUTO_ENABLED`: Set to `false` to disable automatic recency-triggered searches (default: `true`). `/web` still works when the key is set.
+- `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash). This is a secret too, so it stays in the environment.
+
+### Configuration (`api/settings.py`)
+Non-secret configuration is centralized in [api/settings.py](api/settings.py):
+- `WHITELIST_IDS`: Chat or user IDs allowed to use the bot. An empty set locks the bot down, so add your IDs here.
+- `DEEPSEEK_MODEL`: The DeepSeek model to use for chat (default: `deepseek-v4-flash`).
+- `DEEPSEEK_BASE_URL`: DeepSeek API base URL (default: `https://api.deepseek.com`).
+- `CHAT_OUTPUT_LIMIT_CHARS`: Maximum output length instruction sent to DeepSeek (default: `4096`).
+- `CONVERSATION_HISTORY_LIMIT`: Messages kept per chat in Redis (default: `10`).
+- `CONVERSATION_TTL_SECONDS`: How long conversation history is kept (default: `3600`).
+- `WEB_SEARCH_AUTO_ENABLED`: Set to `False` to disable automatic recency-triggered searches (default: `True`). `/web` still works when the key is set.
 - `WEB_SEARCH_MAX_RESULTS`: Number of search results to fetch and inject (default: `5`).
 - `WEB_SEARCH_CACHE_TTL_SECONDS`: How long search results are cached in Redis (default: `600`).
 - `WEB_SEARCH_DAILY_LIMIT`: Maximum uncached live searches per user per UTC day (default: `50`).
 - `WEB_SEARCH_TIMEOUT_SECONDS`: Timeout for each Tavily request (default: `8`).
 - `WEB_SEARCH_CONTEXT_MAX_CHARS`: Cap for the search context injected into DeepSeek (default: `8000`).
-
-## Setup Instructions
+- Image settings: model names, output size, quality, moderation, and the edit lock TTL for `/generate`, `/draw`, `/gooddraw`, `/edit`, and `/goodedit`.
+- `BOT_USERNAME`: Used to recognize commands such as `/edit@BahlulBot` (default: `BahlulBot`).## Setup Instructions
 
 1. **Clone the Repository**
    ```bash
@@ -52,7 +60,7 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 2. **Install Dependencies**
    Ensure you have Python 3.8+ installed. Install the required packages:
    ```bash
-   pip install -r api/requirements.txt
+   pip install -r requirements.txt
    ```
     The `requirements.txt` should contain:
     ```
@@ -71,17 +79,16 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
    - Create a new Redis database and copy the `REDIS_URL` (e.g., `rediss://:<token>@<host>:<port>`).
    - This is used for storing conversation history to enable contextual responses.
 
-4. **Configure Environment Variables**
+4. **Configure Secrets (Environment Variables)**
    - In Vercel, go to Dashboard > Project > Settings > Environment Variables.
-    - Add:
-      - `TELEGRAM_TOKEN`: Your bot token from `@BotFather`.
-      - `DEEPSEEK_API_KEY`: Your DeepSeek API key.
-      - `DEEPSEEK_MODEL`: Set to `deepseek-v4-flash-0731` (or another valid DeepSeek model; see https://platform.deepseek.com).
-      - `DEEPSEEK_BASE_URL`: Optional; defaults to `https://api.deepseek.com`.
-      - `GROK_API_KEY`: Your xAI Grok API key (required for `/generate`).
-      - `OPENAI_API_KEY`: Your OpenAI API key (required for `/draw`, `/gooddraw`, `/edit`, `/goodedit`).
-      - `REDIS_URL`: The Redis connection URL from Upstash.
-      - `TAVILY_API_KEY`: (Optional) Your Tavily API key for live web search (https://www.tavily.com). Automatic recency search is disabled if omitted.
+   - Add only the secrets:
+     - `TELEGRAM_TOKEN`: Your bot token from `@BotFather`.
+     - `DEEPSEEK_API_KEY`: Your DeepSeek API key.
+     - `GROK_API_KEY`: Your xAI Grok API key (required for `/generate`).
+     - `OPENAI_API_KEY`: Your OpenAI API key (required for `/draw`, `/gooddraw`, `/edit`, `/goodedit`).
+     - `REDIS_URL`: The Redis connection URL from Upstash.
+     - `TAVILY_API_KEY`: (Optional) Your Tavily API key for live web search (https://www.tavily.com). Automatic recency search is disabled if omitted.
+   - Edit `api/settings.py` for model names, limits, whitelist IDs, and other non-secret options.
 
 5. **Deploy to Vercel**
    - Connect your GitHub repository to Vercel.
@@ -211,12 +218,12 @@ This performs a single basic search for `"latest AI news today"`, prints the top
   - Test the key locally with `curl -X POST https://api.tavily.com/search -H "Content-Type: application/json" -d '{"api_key":"<KEY>","query":"test","search_depth":"basic"}'`.
 - **Web Search Daily Limit Reached**:
   - Logs will show `Web search daily limit reached for user <id>`.
-  - Raise `WEB_SEARCH_DAILY_LIMIT` to increase the per-user cap.
+  - Increase `WEB_SEARCH_DAILY_LIMIT` in `api/settings.py` to raise the per-user cap.
   - Cached queries do not count toward the daily limit.
 - **DeepSeek API Issues**:
-  - Verify `DEEPSEEK_API_KEY` and `DEEPSEEK_MODEL` (see https://platform.deepseek.com).
+  - Verify `DEEPSEEK_API_KEY` and the `DEEPSEEK_MODEL` value in `api/settings.py` (see https://platform.deepseek.com).
   - Check logs for errors from DeepSeek interactions (look for `Error processing /ask command` or `Error processing message`).
-  - If you see a model-not-found error, confirm `deepseek-v4-flash-0731` is enabled for your account, or override `DEEPSEEK_MODEL` with a valid model ID.
+  - If you see a model-not-found error, confirm `deepseek-v4-flash` is enabled for your account, or change `DEEPSEEK_MODEL` in `api/settings.py` to a valid model ID.
   - Ensure `openai` is installed (`pip show openai`).
 
 - **Grok Image Generation Issues** (`/generate`):

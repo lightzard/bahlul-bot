@@ -27,7 +27,8 @@ os.environ.setdefault("DEEPSEEK_API_KEY", "test-deepseek-key")
 
 def test_message_building():
     """Test that conversation history is correctly converted to OpenAI-compatible messages."""
-    from api.app import get_deepseek_response, DEEPSEEK_MODEL
+    from api import settings
+    from api.app import get_deepseek_response
 
     conversation = [
         {"role": "user", "content": "What is the capital of France?"},
@@ -52,7 +53,7 @@ def test_message_building():
     # Verify the API was called with correct model and messages
     mock_client.chat.completions.create.assert_called_once()
     call_args = mock_client.chat.completions.create.call_args
-    assert call_args.kwargs["model"] == DEEPSEEK_MODEL, f"Wrong model: {call_args.kwargs['model']}"
+    assert call_args.kwargs["model"] == settings.DEEPSEEK_MODEL, f"Wrong model: {call_args.kwargs['model']}"
 
     messages = call_args.kwargs["messages"]
     # Should have 3 history messages + 1 system output-limit instruction
@@ -101,7 +102,7 @@ def test_missing_api_key():
     """Test that a clear error is raised when DEEPSEEK_API_KEY is missing."""
     from api.app import get_deepseek_response
 
-    with patch("api.app.DEEPSEEK_API_KEY", None):
+    with patch("api.settings.DEEPSEEK_API_KEY", None):
         try:
             asyncio.run(get_deepseek_response([{"role": "user", "content": "test"}]))
             assert False, "Should have raised ValueError"
@@ -112,16 +113,16 @@ def test_missing_api_key():
 
 def test_model_name():
     """Test that the default model is deepseek-v4-flash."""
-    from api.app import DEEPSEEK_MODEL
-    assert DEEPSEEK_MODEL == "deepseek-v4-flash", f"Unexpected default model: {DEEPSEEK_MODEL}"
-    print(f"✓ test_model_name passed (model={DEEPSEEK_MODEL})")
+    from api import settings
+    assert settings.DEEPSEEK_MODEL == "deepseek-v4-flash", f"Unexpected default model: {settings.DEEPSEEK_MODEL}"
+    print(f"✓ test_model_name passed (model={settings.DEEPSEEK_MODEL})")
 
 
 def test_base_url():
     """Test that the DeepSeek base URL is configured correctly."""
-    from api.app import DEEPSEEK_BASE_URL
-    assert "deepseek.com" in DEEPSEEK_BASE_URL, f"Unexpected base URL: {DEEPSEEK_BASE_URL}"
-    print(f"✓ test_base_url passed (base_url={DEEPSEEK_BASE_URL})")
+    from api import settings
+    assert "deepseek.com" in settings.DEEPSEEK_BASE_URL, f"Unexpected base URL: {settings.DEEPSEEK_BASE_URL}"
+    print(f"✓ test_base_url passed (base_url={settings.DEEPSEEK_BASE_URL})")
 
 
 async def live_test():
@@ -451,9 +452,9 @@ def test_tavily_payload_basic_search():
     sent = {}
     FakeSession = _fake_tavily_session(sent)
 
-    with patch("api.web_search.TAVILY_API_KEY", "test-key"), \
-         patch("api.web_search.WEB_SEARCH_DAILY_LIMIT", 50), \
-         patch("api.web_search.WEB_SEARCH_MAX_RESULTS", 5), \
+    with patch("api.settings.TAVILY_API_KEY", "test-key"), \
+         patch("api.settings.WEB_SEARCH_DAILY_LIMIT", 50), \
+         patch("api.settings.WEB_SEARCH_MAX_RESULTS", 5), \
          patch("api.web_search.aiohttp.ClientSession", FakeSession):
         result = asyncio.run(search_web("What is the latest news?", None, 123))
 
@@ -494,7 +495,7 @@ def test_cache_hit_avoids_second_call():
         async def post(self, *args, **kwargs):
             raise AssertionError("Tavily must not be called on cache hit")
 
-    with patch("api.web_search.TAVILY_API_KEY", "test-key"), \
+    with patch("api.settings.TAVILY_API_KEY", "test-key"), \
          patch("api.web_search.aiohttp.ClientSession", BoomSession):
         result = asyncio.run(search_web("What is the latest news?", FakeRedis(), 456))
 
@@ -530,8 +531,8 @@ def test_daily_quota_blocks_after_limit():
         async def post(self, *args, **kwargs):
             raise AssertionError("Tavily must not be called when quota exceeded")
 
-    with patch("api.web_search.TAVILY_API_KEY", "test-key"), \
-         patch("api.web_search.WEB_SEARCH_DAILY_LIMIT", 3), \
+    with patch("api.settings.TAVILY_API_KEY", "test-key"), \
+         patch("api.settings.WEB_SEARCH_DAILY_LIMIT", 3), \
          patch("api.web_search.aiohttp.ClientSession", BoomSession):
         # Count already at limit → blocked without calling Tavily.
         result = asyncio.run(search_web("What is the latest news?", FakeRedis(3), 789))
@@ -545,13 +546,13 @@ def test_search_failure_falls_back():
     from api.web_search import search_web
     from unittest.mock import patch
 
-    with patch("api.web_search.TAVILY_API_KEY", None):
+    with patch("api.settings.TAVILY_API_KEY", None):
         result = asyncio.run(search_web("What is the latest news?", None, 1))
         assert result.ok is False
         assert "TAVILY_API_KEY" in result.error
         print("✓ missing TAVILY_API_KEY handled gracefully")
 
-    with patch("api.web_search.TAVILY_API_KEY", "test-key"), \
+    with patch("api.settings.TAVILY_API_KEY", "test-key"), \
          patch("api.web_search.aiohttp.ClientSession", _fake_tavily_session({}, error=TimeoutError("timed out"))):
         result = asyncio.run(search_web("What is the latest news?", None, 1))
         assert result.ok is False

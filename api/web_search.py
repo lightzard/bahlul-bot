@@ -3,26 +3,19 @@
 import hashlib
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import aiohttp
 
+from api import settings
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuration (environment variables)
+# Configuration (api/settings.py)
 # ---------------------------------------------------------------------------
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-WEB_SEARCH_AUTO_ENABLED = os.getenv("WEB_SEARCH_AUTO_ENABLED", "true").lower() in ("1", "true", "yes", "on")
-WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
-WEB_SEARCH_CACHE_TTL_SECONDS = int(os.getenv("WEB_SEARCH_CACHE_TTL_SECONDS", "600"))
-WEB_SEARCH_DAILY_LIMIT = int(os.getenv("WEB_SEARCH_DAILY_LIMIT", "50"))
-WEB_SEARCH_TIMEOUT_SECONDS = int(os.getenv("WEB_SEARCH_TIMEOUT_SECONDS", "8"))
-WEB_SEARCH_CONTEXT_MAX_CHARS = int(os.getenv("WEB_SEARCH_CONTEXT_MAX_CHARS", "8000"))
-
 TAVILY_API_URL = "https://api.tavily.com/search"
 
 # ---------------------------------------------------------------------------
@@ -261,8 +254,8 @@ async def _set_cached(redis_client, query: str, results: list) -> None:
         return
     try:
         payload = json.dumps({"results": [r.to_dict() for r in results]})
-        await redis_client.set(_cache_key(query), payload, ex=WEB_SEARCH_CACHE_TTL_SECONDS)
-        logger.info("Cached web search results for query: %s (TTL %ss)", query, WEB_SEARCH_CACHE_TTL_SECONDS)
+        await redis_client.set(_cache_key(query), payload, ex=settings.WEB_SEARCH_CACHE_TTL_SECONDS)
+        logger.info("Cached web search results for query: %s (TTL %ss)", query, settings.WEB_SEARCH_CACHE_TTL_SECONDS)
     except Exception as e:
         logger.error("Error caching web search results: %s", str(e))
 
@@ -280,7 +273,7 @@ async def _quota_exceeded(redis_client, user_id: int) -> bool:
         key = _daily_key(user_id)
         value = await redis_client.get(key)
         count = int(value) if value else 0
-        if count >= WEB_SEARCH_DAILY_LIMIT:
+        if count >= settings.WEB_SEARCH_DAILY_LIMIT:
             logger.warning("Web search daily limit reached for user %s", user_id)
             return True
         await redis_client.set(key, str(count + 1), ex=86400)
@@ -295,18 +288,18 @@ async def _quota_exceeded(redis_client, user_id: int) -> bool:
 # ---------------------------------------------------------------------------
 async def _call_tavily(query: str) -> list:
     """Perform a basic Tavily search and return parsed SearchResult objects."""
-    if not TAVILY_API_KEY:
+    if not settings.TAVILY_API_KEY:
         raise RuntimeError("TAVILY_API_KEY is not set")
     payload = {
-        "api_key": TAVILY_API_KEY,
+        "api_key": settings.TAVILY_API_KEY,
         "query": query,
         "search_depth": "basic",
-        "max_results": WEB_SEARCH_MAX_RESULTS,
+        "max_results": settings.WEB_SEARCH_MAX_RESULTS,
         "include_answer": False,
         "include_raw_content": False,
     }
     headers = {"Content-Type": "application/json"}
-    timeout = aiohttp.ClientTimeout(total=WEB_SEARCH_TIMEOUT_SECONDS)
+    timeout = aiohttp.ClientTimeout(total=settings.WEB_SEARCH_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(TAVILY_API_URL, json=payload, headers=headers) as resp:
             if resp.status != 200:
@@ -344,7 +337,7 @@ async def search_web(query: str, redis_client, user_id: int) -> WebSearchOutcome
 
     # 2. Enforce daily quota on cache misses.
     if user_id is not None and await _quota_exceeded(redis_client, user_id):
-        return WebSearchOutcome(ok=False, error=f"daily limit of {WEB_SEARCH_DAILY_LIMIT} live searches reached")
+        return WebSearchOutcome(ok=False, error=f"daily limit of {settings.WEB_SEARCH_DAILY_LIMIT} live searches reached")
 
     # 3. Search the live web.
     try:
@@ -397,7 +390,7 @@ def format_search_context(query: str, results: list) -> str:
         "Sources:",
     ]
 
-    budget = WEB_SEARCH_CONTEXT_MAX_CHARS
+    budget = settings.WEB_SEARCH_CONTEXT_MAX_CHARS
     for idx, result in enumerate(results, start=1):
         header = f"[{idx}] {_trim(result.title, 200)}"
         meta_bits = []
