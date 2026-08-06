@@ -25,18 +25,18 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 - `aiohttp`: For downloading image files during image editing.
 - `xai-sdk`: For xAI Grok image generation (`/generate`).
 
-### Secrets (Environment Variables)
-Only secrets are configured through environment variables; all other configuration lives in `api/settings.py`.
+### Environment Variables
+Secrets and access control are configured through environment variables; all other configuration lives in `api/settings.py`.
 - `TELEGRAM_TOKEN`: Your Telegram bot token from `@BotFather`.
 - `DEEPSEEK_API_KEY`: Your DeepSeek API key (see https://platform.deepseek.com for details).
 - `GROK_API_KEY`: Your xAI Grok API key, required for `/generate` image generation (see https://x.ai/api for details).
 - `OPENAI_API_KEY`: Your OpenAI API key, required for `/draw`, `/gooddraw`, `/edit`, and `/goodedit`.
 - `TAVILY_API_KEY`: Your Tavily API key, required to enable live web search (see https://www.tavily.com). Optional—chat works without it, but automatic recency search is disabled.
+- `WHITELIST_IDS`: Comma-separated chat or user IDs allowed to use the bot (e.g., `123456789,987654321`). If unset or empty, nobody can use the bot.
 - `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash). This is a secret too, so it stays in the environment.
 
 ### Configuration (`api/settings.py`)
 Non-secret configuration is centralized in [api/settings.py](api/settings.py):
-- `WHITELIST_IDS`: Chat or user IDs allowed to use the bot. An empty set locks the bot down, so add your IDs here.
 - `DEEPSEEK_MODEL`: The DeepSeek model to use for chat (default: `deepseek-v4-flash`).
 - `DEEPSEEK_BASE_URL`: DeepSeek API base URL (default: `https://api.deepseek.com`).
 - `CHAT_OUTPUT_LIMIT_CHARS`: Maximum output length instruction sent to DeepSeek (default: `4096`).
@@ -49,7 +49,9 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
 - `WEB_SEARCH_TIMEOUT_SECONDS`: Timeout for each Tavily request (default: `8`).
 - `WEB_SEARCH_CONTEXT_MAX_CHARS`: Cap for the search context injected into DeepSeek (default: `8000`).
 - Image settings: model names, output size, quality, moderation, and the edit lock TTL for `/generate`, `/draw`, `/gooddraw`, `/edit`, and `/goodedit`.
-- `BOT_USERNAME`: Used to recognize commands such as `/edit@BahlulBot` (default: `BahlulBot`).## Setup Instructions
+- `BOT_USERNAME`: Used to recognize commands such as `/edit@BahlulBot` (default: `BahlulBot`).
+
+## Setup Instructions
 
 1. **Clone the Repository**
    ```bash
@@ -81,14 +83,15 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
 
 4. **Configure Secrets (Environment Variables)**
    - In Vercel, go to Dashboard > Project > Settings > Environment Variables.
-   - Add only the secrets:
+   - Add the secrets (and optionally `WHITELIST_IDS`):
      - `TELEGRAM_TOKEN`: Your bot token from `@BotFather`.
      - `DEEPSEEK_API_KEY`: Your DeepSeek API key.
      - `GROK_API_KEY`: Your xAI Grok API key (required for `/generate`).
      - `OPENAI_API_KEY`: Your OpenAI API key (required for `/draw`, `/gooddraw`, `/edit`, `/goodedit`).
      - `REDIS_URL`: The Redis connection URL from Upstash.
      - `TAVILY_API_KEY`: (Optional) Your Tavily API key for live web search (https://www.tavily.com). Automatic recency search is disabled if omitted.
-   - Edit `api/settings.py` for model names, limits, whitelist IDs, and other non-secret options.
+     - `WHITELIST_IDS`: (Optional) Comma-separated chat or user IDs allowed to use the bot. If unset, nobody can use it.
+   - Edit `api/settings.py` for model names, limits, and other non-secret options.
 
 5. **Deploy to Vercel**
    - Connect your GitHub repository to Vercel.

@@ -1,8 +1,9 @@
 """Central configuration for BahlulBot.
 
-Only secrets (tokens, API keys, connection URLs) come from environment
-variables. Every other configurable value lives in this file so it can be
-adjusted without touching the deployment environment.
+Secrets (tokens, API keys, connection URLs) and the WHITELIST_IDS access
+list come from environment variables. Every other configurable value lives
+in this file so it can be adjusted without touching the deployment
+environment.
 """
 
 import os
@@ -19,11 +20,13 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # ---------------------------------------------------------------------------
-# Access control
+# Access control (environment variable)
 # ---------------------------------------------------------------------------
-# Chat or user IDs allowed to use the bot. An empty set locks the bot down;
-# add IDs here (e.g. {"123456789", "987654321"}) to authorize them.
-WHITELIST_IDS: set[str] = set()
+# Comma-separated chat or user IDs allowed to use the bot. Empty (or unset)
+# locks the bot down; set the WHITELIST_IDS env var to authorize them.
+WHITELIST_IDS = {
+    id.strip() for id in os.getenv("WHITELIST_IDS", "").split(",") if id.strip()
+}
 
 # ---------------------------------------------------------------------------
 # Chat (DeepSeek)
