@@ -112,9 +112,9 @@ def test_missing_api_key():
 
 
 def test_model_name():
-    """Test that the default model is deepseek-4.1-flash."""
+    """Test that the default model is deepseek-flash."""
     from api import settings
-    assert settings.DEEPSEEK_MODEL == "deepseek-4.1-flash", f"Unexpected default model: {settings.DEEPSEEK_MODEL}"
+    assert settings.DEEPSEEK_MODEL == "deepseek-flash", f"Unexpected default model: {settings.DEEPSEEK_MODEL}"
     print(f"✓ test_model_name passed (model={settings.DEEPSEEK_MODEL})")
 
 
