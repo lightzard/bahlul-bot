@@ -31,7 +31,7 @@ WHITELIST_IDS = {
 # ---------------------------------------------------------------------------
 # Chat (DeepSeek)
 # ---------------------------------------------------------------------------
-DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEEPSEEK_MODEL = "deepseek-4.1-flash"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 CHAT_OUTPUT_LIMIT_CHARS = 4096
 CONVERSATION_HISTORY_LIMIT = 10

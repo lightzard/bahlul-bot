@@ -8,7 +8,7 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 - **Text Message Handling**: Processes regular text messages in private chats and group chats (if privacy mode is disabled and the bot is an admin).
 - **Conversation Context**: Stores up to 10 messages per chat (private or group, including topic threads) in a Redis database with a 1-hour expiry, enabling contextual responses from the DeepSeek API.
 - **Webhook-Based**: Uses FastAPI to handle Telegram webhook updates, optimized for Vercel’s serverless environment.
-- **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-v4-flash`) for generating chat responses.
+- **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-4.1-flash`) for generating chat responses.
 - **Live Web Search**: Selectively augments freshness-sensitive questions (news, weather, prices, latest versions, etc.) with Tavily search results, cached in Redis and capped by a per-user daily quota. Use `/web <question>` to force a live search.
 - **xAI Image Generation**: Uses xAI's Grok image model (`grok-2-image`) via the xAI SDK for the `/generate` command.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
@@ -37,7 +37,7 @@ Secrets and access control are configured through environment variables; all oth
 
 ### Configuration (`api/settings.py`)
 Non-secret configuration is centralized in [api/settings.py](api/settings.py):
-- `DEEPSEEK_MODEL`: The DeepSeek model to use for chat (default: `deepseek-v4-flash`).
+- `DEEPSEEK_MODEL`: The DeepSeek model to use for chat (default: `deepseek-4.1-flash`).
 - `DEEPSEEK_BASE_URL`: DeepSeek API base URL (default: `https://api.deepseek.com`).
 - `CHAT_OUTPUT_LIMIT_CHARS`: Maximum output length instruction sent to DeepSeek (default: `4096`).
 - `CONVERSATION_HISTORY_LIMIT`: Messages kept per chat in Redis (default: `10`).
@@ -226,7 +226,7 @@ This performs a single basic search for `"latest AI news today"`, prints the top
 - **DeepSeek API Issues**:
   - Verify `DEEPSEEK_API_KEY` and the `DEEPSEEK_MODEL` value in `api/settings.py` (see https://platform.deepseek.com).
   - Check logs for errors from DeepSeek interactions (look for `Error processing /ask command` or `Error processing message`).
-  - If you see a model-not-found error, confirm `deepseek-v4-flash` is enabled for your account, or change `DEEPSEEK_MODEL` in `api/settings.py` to a valid model ID.
+  - If you see a model-not-found error, confirm `deepseek-4.1-flash` is enabled for your account, or change `DEEPSEEK_MODEL` in `api/settings.py` to a valid model ID.
   - Ensure `openai` is installed (`pip show openai`).
 
 - **Grok Image Generation Issues** (`/generate`):

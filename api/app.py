@@ -175,7 +175,7 @@ async def process_chat_query(
         await _reply(update, text=f"Error processing your request: {e}")
     finally:
         if redis_client:
-            await redis_client.close()
+            await _close_redis(redis_client)
 
 
 # ---------------------------------------------------------------------------
@@ -264,20 +264,44 @@ async def init_redis():
     if not settings.REDIS_URL:
         logger.warning("REDIS_URL not set, conversation history will not be stored")
         return None
+    # Tolerate stray quotes/whitespace from copy-pasted env var values; they
+    # otherwise break the scheme check or the connection silently.
+    url = settings.REDIS_URL.strip().strip('"').strip("'").strip()
+    redis_client = None
     try:
-        parsed_url = urlparse(settings.REDIS_URL)
+        parsed_url = urlparse(url)
         if parsed_url.scheme not in ("redis", "rediss"):
             logger.error(
                 "Invalid REDIS_URL scheme: %s. Expected redis:// or rediss://",
                 parsed_url.scheme,
             )
             return None
-        redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        # Explicit timeouts keep a dead Redis from hanging the webhook until
+        # Telegram gives up and re-delivers the update.
+        redis_client = redis.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+        # from_url() does not open a connection; ping so the success log and
+        # the client we hand out reflect a Redis that actually answers.
+        await redis_client.ping()
         logger.info("Successfully connected to Redis")
         return redis_client
     except Exception as e:
         logger.error("Failed to connect to Redis: %s", e)
+        if redis_client is not None:
+            await _close_redis(redis_client)
         return None
+
+
+async def _close_redis(redis_client) -> None:
+    """Close a client across redis-py versions (aclose() replaced close())."""
+    if redis_client is None:
+        return
+    close = getattr(redis_client, "aclose", None) or redis_client.close
+    await close()
 
 
 async def get_conversation_history(redis_client, conversation_key: str) -> list:
@@ -296,8 +320,13 @@ async def save_conversation_history(redis_client, conversation_key: str, convers
         return
     try:
         conversation = conversation[-settings.CONVERSATION_HISTORY_LIMIT:]
-        await redis_client.set(conversation_key, json.dumps(conversation))
-        await redis_client.expire(conversation_key, settings.CONVERSATION_TTL_SECONDS)
+        # Single SET with TTL: one round trip and the expiry is applied
+        # atomically with the write, so history can never linger without TTL.
+        await redis_client.set(
+            conversation_key,
+            json.dumps(conversation),
+            ex=settings.CONVERSATION_TTL_SECONDS,
+        )
         logger.info("Saved conversation history for %s", conversation_key)
     except Exception as e:
         logger.error("Error saving conversation history for %s: %s", conversation_key, e)
@@ -356,7 +385,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reply(update, text=f"Error generating image: {e}")
     finally:
         if redis_client:
-            await redis_client.close()
+            await _close_redis(redis_client)
 
 
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -415,7 +444,7 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reply(update, text=f"Error generating image: {e}")
     finally:
         if redis_client:
-            await redis_client.close()
+            await _close_redis(redis_client)
 
 
 async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -505,7 +534,7 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if redis_client is not None:
             await redis_client.delete("is_editing")
-            await redis_client.close()
+            await _close_redis(redis_client)
 
 
 # ---------------------------------------------------------------------------

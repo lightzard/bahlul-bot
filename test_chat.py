@@ -112,9 +112,9 @@ def test_missing_api_key():
 
 
 def test_model_name():
-    """Test that the default model is deepseek-v4-flash."""
+    """Test that the default model is deepseek-4.1-flash."""
     from api import settings
-    assert settings.DEEPSEEK_MODEL == "deepseek-v4-flash", f"Unexpected default model: {settings.DEEPSEEK_MODEL}"
+    assert settings.DEEPSEEK_MODEL == "deepseek-4.1-flash", f"Unexpected default model: {settings.DEEPSEEK_MODEL}"
     print(f"✓ test_model_name passed (model={settings.DEEPSEEK_MODEL})")
 
 
@@ -591,6 +591,202 @@ def test_web_context_in_deepseek_and_not_persisted():
     print("✓ web context injected into DeepSeek but not persisted to history")
 
 
+# ---------------------------------------------------------------------------
+# Conversation history cache tests (mocked Redis, no network required)
+# ---------------------------------------------------------------------------
+class FakeRedis:
+    """Minimal async Redis double: dict storage with TTL tracking."""
+
+    def __init__(self):
+        self.store = {}
+        self.ttls = {}
+        self.set_calls = []
+        self.expire_calls = []
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.store:
+            return None
+        self.set_calls.append({"key": key, "value": value, "ex": ex, "nx": nx})
+        self.store[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
+        return True
+
+    async def expire(self, key, ttl):
+        self.expire_calls.append({"key": key, "ttl": ttl})
+        self.ttls[key] = ttl
+        return True
+
+    async def delete(self, key):
+        self.store.pop(key, None)
+
+    async def ping(self):
+        return True
+
+    async def aclose(self):
+        pass
+
+    # Kept for parity with older redis-py versions.
+    async def close(self):
+        pass
+
+
+def _make_telegram_update(chat_id=111, user_id=222, text="hello"):
+    update = MagicMock()
+    update.message.chat.id = chat_id
+    update.message.message_thread_id = None
+    update.message.from_user.id = user_id
+    update.message.text = text
+    update.message.reply_text = AsyncMock()
+    update.message.reply_photo = AsyncMock()
+    return update
+
+
+def _mock_deepseek_client(reply):
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = reply
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=mock_response)
+    return client
+
+
+def test_conversation_history_roundtrip():
+    """A second query must see the first exchange from the cached history."""
+    from api import app as app_module
+    from api.app import process_chat_query
+
+    fake_redis = FakeRedis()
+    clients = [
+        _mock_deepseek_client("Nice to meet you!"),
+        _mock_deepseek_client("You are John."),
+    ]
+    client_iter = iter(clients)
+
+    updates = [
+        _make_telegram_update(text="Hi, I am John"),
+        _make_telegram_update(text="What is my name?"),
+    ]
+
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.app.AsyncOpenAI", side_effect=lambda **kw: next(client_iter)), \
+         patch("api.settings.TAVILY_API_KEY", None):
+        asyncio.run(process_chat_query(updates[0], "Hi, I am John"))
+        asyncio.run(process_chat_query(updates[1], "What is my name?"))
+
+    # The second DeepSeek call must include the prior user+assistant exchange.
+    second_messages = clients[1].chat.completions.create.call_args.kwargs["messages"]
+    assert second_messages[0] == {"role": "user", "content": "Hi, I am John"}
+    assert second_messages[1] == {"role": "assistant", "content": "Nice to meet you!"}
+    assert second_messages[2] == {"role": "user", "content": "What is my name?"}
+
+    saved = json.loads(fake_redis.store["chat:111:main"])
+    assert len(saved) == 4, f"Expected 4 saved messages, got {len(saved)}: {saved}"
+    assert saved[0] == {"role": "user", "content": "Hi, I am John"}
+    assert saved[1] == {"role": "assistant", "content": "Nice to meet you!"}
+    assert saved[2] == {"role": "user", "content": "What is my name?"}
+    assert saved[3] == {"role": "assistant", "content": "You are John."}
+    # TTL must be applied so recent conversation survives between messages.
+    assert fake_redis.ttls["chat:111:main"] > 0, "Conversation TTL was not set"
+    print("✓ conversation history round-trips through the cache with TTL")
+
+
+def test_conversation_history_respects_limit():
+    """Only the last CONVERSATION_HISTORY_LIMIT messages should be stored."""
+    from api import settings
+    from api.app import save_conversation_history
+
+    fake_redis = FakeRedis()
+    conversation = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"message {i}"}
+        for i in range(settings.CONVERSATION_HISTORY_LIMIT + 6)
+    ]
+
+    asyncio.run(save_conversation_history(fake_redis, "chat:1:main", conversation))
+
+    stored = json.loads(fake_redis.store["chat:1:main"])
+    assert len(stored) == settings.CONVERSATION_HISTORY_LIMIT, (
+        f"Expected {settings.CONVERSATION_HISTORY_LIMIT} stored messages, got {len(stored)}"
+    )
+    assert stored[-1]["content"] == f"message {settings.CONVERSATION_HISTORY_LIMIT + 5}"
+    print("✓ conversation history is trimmed to the configured limit")
+
+
+def test_save_history_sets_ttl_atomically():
+    """The TTL must be applied by SET itself, not a follow-up EXPIRE."""
+    from api import settings
+    from api.app import save_conversation_history
+
+    fake_redis = FakeRedis()
+    asyncio.run(
+        save_conversation_history(fake_redis, "chat:1:main", [{"role": "user", "content": "hi"}])
+    )
+
+    assert fake_redis.set_calls, "SET was never called"
+    assert fake_redis.set_calls[0]["ex"] == settings.CONVERSATION_TTL_SECONDS, (
+        "SET must carry the TTL via ex= so the write and expiry are atomic"
+    )
+    assert not fake_redis.expire_calls, "Separate EXPIRE call is redundant with SET ex="
+    print("✓ history save applies TTL atomically in a single SET")
+
+
+def test_init_redis_pings_and_cleans_url():
+    """init_redis must verify connectivity with ping and strip env-var noise."""
+    from api import app as app_module
+
+    fake = MagicMock()
+    fake.ping = AsyncMock(return_value=True)
+    fake.aclose = AsyncMock()
+
+    noisy_url = '"  rediss://default:token@host.example.com:6379  "'
+    with patch("api.settings.REDIS_URL", noisy_url), \
+         patch("api.app.redis") as mock_redis_module:
+        mock_redis_module.from_url.return_value = fake
+        client = asyncio.run(app_module.init_redis())
+
+    assert client is fake, "init_redis should return the verified client"
+    fake.ping.assert_awaited_once(), "init_redis must ping before trusting the connection"
+    passed_url = mock_redis_module.from_url.call_args.args[0]
+    assert passed_url == "rediss://default:token@host.example.com:6379", (
+        f"URL not cleaned of quotes/whitespace: {passed_url!r}"
+    )
+    print("✓ init_redis pings the server and cleans the REDIS_URL")
+
+
+def test_init_redis_unreachable_returns_none():
+    """An unreachable Redis must be detected at init, not silently degrade later."""
+    from api import app as app_module
+
+    fake = MagicMock()
+    fake.ping = AsyncMock(side_effect=ConnectionError("connection refused"))
+    fake.aclose = AsyncMock()
+
+    with patch("api.settings.REDIS_URL", "rediss://default:token@host.example.com:6379"), \
+         patch("api.app.redis") as mock_redis_module:
+        mock_redis_module.from_url.return_value = fake
+        client = asyncio.run(app_module.init_redis())
+
+    assert client is None, "init_redis must not return an unverified client"
+    fake.aclose.assert_awaited_once(), "Failed init must close the half-open client"
+    print("✓ init_redis detects an unreachable Redis instead of faking success")
+
+
+def test_init_redis_rejects_invalid_scheme():
+    """Non-redis:// schemes must be rejected with no client returned."""
+    from api import app as app_module
+
+    with patch("api.settings.REDIS_URL", "http://not-redis.example.com"), \
+         patch("api.app.redis") as mock_redis_module:
+        mock_redis_module.from_url.side_effect = AssertionError("from_url must not be called")
+        client = asyncio.run(app_module.init_redis())
+
+    assert client is None
+    print("✓ init_redis rejects invalid REDIS_URL schemes")
+
+
 def run_mocked_tests():
     """Run all mocked tests (no API keys or network required)."""
     print("=" * 60)
@@ -612,6 +808,12 @@ def run_mocked_tests():
     test_daily_quota_blocks_after_limit()
     test_search_failure_falls_back()
     test_web_context_in_deepseek_and_not_persisted()
+    test_conversation_history_roundtrip()
+    test_conversation_history_respects_limit()
+    test_save_history_sets_ttl_atomically()
+    test_init_redis_pings_and_cleans_url()
+    test_init_redis_unreachable_returns_none()
+    test_init_redis_rejects_invalid_scheme()
     print("=" * 60)
     print("All mocked tests passed! ✓")
     print("=" * 60)
