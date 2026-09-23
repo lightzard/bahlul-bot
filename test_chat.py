@@ -787,6 +787,294 @@ def test_init_redis_rejects_invalid_scheme():
     print("✓ init_redis rejects invalid REDIS_URL schemes")
 
 
+# ---------------------------------------------------------------------------
+# Image backend tests (mocked RunPod API + handlers, no network required)
+# ---------------------------------------------------------------------------
+class _FakeResponse:
+    def __init__(self, status, body, raw=b""):
+        self.status = status
+        self._body = body
+        self._raw = raw
+
+    async def json(self, content_type=None):
+        return self._body
+
+    async def read(self):
+        return self._raw
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _multi_patch(patches):
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    for p in patches:
+        stack.enter_context(p)
+    return stack
+
+
+class _FakeAiohttpSession:
+    """Canned aiohttp.ClientSession double: scripted post/get responses."""
+
+    def __init__(self, posts=None, gets=None):
+        self.posts = list(posts or [])
+        self.gets = list(gets or [])
+        self.post_calls = []
+        self.get_calls = []
+
+    def post(self, url, json=None):
+        self.post_calls.append({"url": url, "json": json})
+        return self.posts.pop(0)
+
+    def get(self, url):
+        self.get_calls.append({"url": url})
+        return self.gets.pop(0)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _runpod_settings_patches(**overrides):
+    from api import settings
+
+    values = {
+        "RUNPOD_API_KEY": "test-runpod-key",
+        "RUNPOD_ENDPOINT_ID": "test-endpoint",
+        "RUNPOD_API_BASE_URL": "https://api.runpod.ai",
+        "IMAGE_POLL_INTERVAL_SECONDS": 0,
+        "IMAGE_BACKEND_TIMEOUT_SECONDS": 30,
+    }
+    values.update(overrides)
+    return [patch(f"api.settings.{name}", value) for name, value in values.items()]
+
+
+def test_runpod_backend_success():
+    """Submit -> poll -> COMPLETED returns decoded image bytes."""
+    import base64
+
+    from api.image_backend import ImageBackendError, generate_image
+    from api.image_backend import runpod_backend as rb
+
+    png = b"\x89PNG fake image bytes"
+    session = _FakeAiohttpSession(
+        posts=[_FakeResponse(200, {"id": "job-1", "status": "IN_QUEUE"})],
+        gets=[
+            _FakeResponse(200, {"id": "job-1", "status": "IN_PROGRESS"}),
+            _FakeResponse(200, {"id": "job-1", "status": "COMPLETED",
+                                "output": {"image_base64": base64.b64encode(png).decode()}}),
+        ],
+    )
+
+    patches = _runpod_settings_patches()
+    patches.append(patch.object(rb.aiohttp, "ClientSession", return_value=session))
+    with _multi_patch(patches):
+        result = asyncio.run(generate_image("a cat astronaut", width=768, steps=25))
+
+    assert result == png, f"Unexpected image bytes: {result!r}"
+    submit = session.post_calls[0]
+    assert submit["url"] == "https://api.runpod.ai/v2/test-endpoint/run", submit["url"]
+    job_input = submit["json"]["input"]
+    assert job_input["task"] == "text2img"
+    assert job_input["prompt"] == "a cat astronaut"
+    assert job_input["width"] == 768
+    assert job_input["steps"] == 25
+    assert session.get_calls[0]["url"].endswith("/status/job-1")
+    print("✓ RunPod backend submits, polls, and returns image bytes")
+
+
+def test_runpod_backend_failed_job():
+    """A FAILED job surfaces as ImageBackendError with the worker error."""
+    from api.image_backend import ImageBackendError, generate_image
+    from api.image_backend import runpod_backend as rb
+
+    session = _FakeAiohttpSession(
+        posts=[_FakeResponse(200, {"id": "job-2", "status": "IN_QUEUE"})],
+        gets=[_FakeResponse(200, {"id": "job-2", "status": "FAILED",
+                                  "error": "CUDA out of memory"})],
+    )
+
+    patches = _runpod_settings_patches()
+    patches.append(patch.object(rb.aiohttp, "ClientSession", return_value=session))
+    try:
+        with _multi_patch(patches):
+            asyncio.run(generate_image("prompt"))
+        assert False, "Should have raised ImageBackendError"
+    except ImageBackendError as e:
+        assert "FAILED" in str(e) and "CUDA out of memory" in str(e), str(e)
+    print("✓ RunPod backend raises on FAILED jobs with the worker error")
+
+
+def test_runpod_backend_timeout():
+    """A job that never finishes raises ImageBackendError on the deadline."""
+    from api.image_backend import ImageBackendError, generate_image
+    from api.image_backend import runpod_backend as rb
+
+    session = _FakeAiohttpSession(
+        posts=[_FakeResponse(200, {"id": "job-3", "status": "IN_QUEUE"})],
+        gets=[_FakeResponse(200, {"id": "job-3", "status": "IN_PROGRESS"})],
+    )
+
+    patches = _runpod_settings_patches(IMAGE_BACKEND_TIMEOUT_SECONDS=0)
+    patches.append(patch.object(rb.aiohttp, "ClientSession", return_value=session))
+    try:
+        with _multi_patch(patches):
+            asyncio.run(generate_image("prompt"))
+        assert False, "Should have raised ImageBackendError"
+    except ImageBackendError as e:
+        assert "did not finish" in str(e), str(e)
+    print("✓ RunPod backend times out when the job exceeds the budget")
+
+
+def test_runpod_backend_requires_config():
+    """Missing RUNPOD_* settings produce a clear configuration error."""
+    from api.image_backend import ImageBackendError, generate_image
+
+    with patch("api.settings.RUNPOD_API_KEY", None), \
+         patch("api.settings.RUNPOD_ENDPOINT_ID", "ep"):
+        try:
+            asyncio.run(generate_image("prompt"))
+            assert False, "Should have raised ImageBackendError"
+        except ImageBackendError as e:
+            assert "RUNPOD_API_KEY" in str(e), str(e)
+    print("✓ RunPod backend reports missing configuration clearly")
+
+
+def test_dummy_backend_returns_png():
+    """The dummy backend returns valid PNG headers for both operations."""
+    from api.image_backend.dummy_backend import DummyBackend
+
+    backend = DummyBackend()
+    generated = asyncio.run(backend.generate_image("test"))
+    edited = asyncio.run(backend.edit_image(b"source", "test"))
+    assert generated.startswith(b"\x89PNG") and edited.startswith(b"\x89PNG")
+    print("✓ dummy backend returns valid PNG bytes")
+
+
+def _make_photo_update(caption="/edit make it night", chat_id=111, user_id=222):
+    update = MagicMock()
+    update.message.chat.id = chat_id
+    update.message.message_thread_id = None
+    update.message.from_user.id = user_id
+    update.message.caption = caption
+    update.message.photo = [MagicMock()]
+    update.message.photo[-1].get_file = AsyncMock(
+        return_value=MagicMock(file_path="https://telegram.org/file.jpg")
+    )
+    update.message.reply_text = AsyncMock()
+    update.message.reply_photo = AsyncMock()
+    return update
+
+
+def test_draw_handler_replies_with_image_and_lock():
+    """/draw acquires the lock, calls the backend, replies with the image."""
+    from api import app as app_module
+    from api.app import draw
+
+    fake_redis = FakeRedis()
+    update = _make_telegram_update(text="/draw a cat astronaut")
+    context = MagicMock()
+    context.args = ["a", "cat", "astronaut"]
+
+    gen = AsyncMock(return_value=b"\x89PNG image bytes")
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.WHITELIST_IDS", {"111"}), \
+         patch("api.image_backend.generate_image", gen):
+        asyncio.run(draw(update, context))
+
+    gen.assert_awaited_once()
+    assert gen.await_args.args[0] == "a cat astronaut"
+    kwargs = gen.await_args.kwargs
+    assert kwargs["width"] > 0 and kwargs["height"] > 0 and kwargs["steps"] > 0
+    update.message.reply_photo.assert_awaited_once()
+    assert update.message.reply_photo.await_args.kwargs["photo"] == b"\x89PNG image bytes"
+
+    # Lock must be acquired and released, and the request logged into history.
+    lock_calls = [c for c in fake_redis.set_calls if c["key"] == "image_op_lock"]
+    assert lock_calls and lock_calls[0]["nx"] and lock_calls[0]["ex"], "lock not acquired with NX+TTL"
+    assert "image_op_lock" not in fake_redis.store, "lock not released"
+    saved = json.loads(fake_redis.store["chat:111:main"])
+    assert {"role": "user", "content": "/draw a cat astronaut"} in saved
+    print("✓ /draw locks, calls the backend, and replies with the image")
+
+
+def test_draw_handler_busy_replies_and_skips_backend():
+    """While the lock is held, /draw replies busy and never calls the backend."""
+    from api import app as app_module
+    from api.app import draw
+
+    fake_redis = FakeRedis()
+    fake_redis.store["image_op_lock"] = "1"
+    update = _make_telegram_update(text="/draw another")
+    context = MagicMock()
+    context.args = ["another"]
+
+    gen = AsyncMock(return_value=b"png")
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.WHITELIST_IDS", {"111"}), \
+         patch("api.image_backend.generate_image", gen):
+        asyncio.run(draw(update, context))
+
+    gen.assert_not_awaited()
+    update.message.reply_photo.assert_not_awaited()
+    update.message.reply_text.assert_awaited_once()
+    assert "busy" in update.message.reply_text.await_args.kwargs["text"].lower()
+    # The held lock must survive (we did not own it).
+    assert "image_op_lock" in fake_redis.store
+    print("✓ /draw rejects overlapping requests while the lock is held")
+
+
+def test_edit_handler_downloads_photo_and_edits():
+    """/edit photo captions download the photo and return the edited image."""
+    from api import app as app_module
+    from api.app import edit_image
+
+    fake_redis = FakeRedis()
+    update = _make_photo_update(caption="/edit make it night")
+    app_module.telegram_app = MagicMock()
+    app_module.telegram_app.bot.get_webhook_info = AsyncMock(
+        return_value=MagicMock(pending_update_count=0)
+    )
+
+    download_session = _FakeAiohttpSession(
+        gets=[_FakeResponse(200, None, raw=b"photo-jpeg-bytes")]
+    )
+
+    edit = AsyncMock(return_value=b"\x89PNG edited bytes")
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.WHITELIST_IDS", {"111"}), \
+         patch.object(app_module.aiohttp, "ClientSession", return_value=download_session), \
+         patch("api.image_backend.edit_image", edit):
+        asyncio.run(edit_image(update, None))
+
+    edit.assert_awaited_once()
+    args = edit.await_args.args
+    assert args[0] == b"photo-jpeg-bytes", "input image bytes not passed through"
+    assert args[1] == "make it night"
+    update.message.reply_photo.assert_awaited_once()
+    assert update.message.reply_photo.await_args.kwargs["photo"] == b"\x89PNG edited bytes"
+    assert "image_op_lock" not in fake_redis.store, "lock not released"
+    print("✓ /edit downloads the photo, edits it, and replies with the result")
+
+
+def test_edit_pattern_matches_only_edit():
+    """The caption regex no longer matches the removed /goodedit command."""
+    from api.app import _EDIT_COMMAND_PATTERN
+
+    assert _EDIT_COMMAND_PATTERN.match("/edit make it night")
+    assert _EDIT_COMMAND_PATTERN.match("/Edit@BahlulBot brighter")
+    assert not _EDIT_COMMAND_PATTERN.match("/goodedit make it night")
+    assert not _EDIT_COMMAND_PATTERN.match("/generate a cat")
+    print("✓ edit caption pattern matches /edit only")
+
+
 def run_mocked_tests():
     """Run all mocked tests (no API keys or network required)."""
     print("=" * 60)
@@ -814,6 +1102,15 @@ def run_mocked_tests():
     test_init_redis_pings_and_cleans_url()
     test_init_redis_unreachable_returns_none()
     test_init_redis_rejects_invalid_scheme()
+    test_runpod_backend_success()
+    test_runpod_backend_failed_job()
+    test_runpod_backend_timeout()
+    test_runpod_backend_requires_config()
+    test_dummy_backend_returns_png()
+    test_draw_handler_replies_with_image_and_lock()
+    test_draw_handler_busy_replies_and_skips_backend()
+    test_edit_handler_downloads_photo_and_edits()
+    test_edit_pattern_matches_only_edit()
     print("=" * 60)
     print("All mocked tests passed! ✓")
     print("=" * 60)

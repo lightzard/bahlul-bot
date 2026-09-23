@@ -1,16 +1,13 @@
 {
-    "version": 2,
-    "builds": [
-        {
-            "src": "api/app.py",
-            "use": "@vercel/python",
-            "config": { "pythonVersion": "3.10" }
+    "functions": {
+        "api/app.py": {
+            "maxDuration": 300
         }
-    ],
-    "routes": [
+    },
+    "rewrites": [
         {
-            "src": "/(.*)",
-            "dest": "api/app.py"
+            "source": "/(.*)",
+            "destination": "api/app.py"
         }
     ]
 }

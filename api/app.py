@@ -1,7 +1,5 @@
 """BahlulBot Telegram bot (FastAPI + Vercel serverless webhook)."""
 
-import base64
-import io
 import json
 import logging
 import re
@@ -19,9 +17,9 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from xai_sdk import Client
 
-from api import settings
+from api import image_backend, settings
+from api.image_backend import ImageBackendError
 from api.web_search import format_search_context, needs_web_search, search_web
 
 app = FastAPI()
@@ -34,9 +32,9 @@ logger = logging.getLogger(__name__)
 
 telegram_app = None
 
-# Matches /edit or /goodedit photo captions, with or without the bot username.
+# Matches /edit photo captions, with or without the bot username.
 _EDIT_COMMAND_PATTERN = re.compile(
-    rf"^/(?P<command>edit|goodedit)(?:@{settings.BOT_USERNAME})?\b.*",
+    rf"^/edit(?:@{settings.BOT_USERNAME})?\b.*",
     re.IGNORECASE,
 )
 
@@ -189,8 +187,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update,
         text=(
             "Hello! I'm BahlulBot, powered by DeepSeek. Use /ask <your question> to get a "
-            "response, /web <your question> to force a live web search, or send a message "
-            "in private chat."
+            "response, /web <your question> to force a live web search, /draw <description> "
+            "to generate an image, or caption a photo with /edit <description> to edit it. "
+            "You can also send a message in private chat."
         ),
     )
 
@@ -333,15 +332,45 @@ async def save_conversation_history(redis_client, conversation_key: str, convers
 
 
 # ---------------------------------------------------------------------------
-# Image generation
+# Image generation and editing (Qwen Image 2.1 via api/image_backend)
 # ---------------------------------------------------------------------------
-async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/generate - xAI Grok image generation."""
+IMAGE_OP_LOCK_KEY = "image_op_lock"
+
+
+async def _acquire_image_op_lock(redis_client, update: Update) -> bool:
+    """Single-flight lock across all image commands.
+
+    A single GPU worker serves the backend, so overlapping requests (including
+    Telegram re-deliveries while a job is running) are rejected instead of
+    queued. Returns True when the request may proceed; replies to the user
+    and returns False otherwise.
+    """
+    if redis_client is None:
+        logger.warning("Redis is not available, proceeding without image op lock")
+        return True
+    acquired = await redis_client.set(
+        IMAGE_OP_LOCK_KEY, "1", nx=True, ex=settings.IMAGE_OP_LOCK_TTL_SECONDS
+    )
+    if not acquired:
+        logger.info("Another image request is in progress, skipping this request")
+        await _reply(
+            update,
+            text=(
+                "I'm still busy with the previous image request "
+                "(cold starts can take a few minutes) — please try again shortly."
+            ),
+        )
+        return False
+    return True
+
+
+async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/draw - text-to-image with Qwen Image 2.1."""
     if update.message is None:
         return
     prompt = _query_from_args(context)
     logger.info(
-        "Received /generate command from chat type %s, chat ID: %s, prompt: %s",
+        "Received /draw command from chat type %s, chat ID: %s, prompt: %s",
         update.message.chat.type,
         update.message.chat.id,
         prompt,
@@ -351,104 +380,49 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not prompt:
         await _reply(
             update,
-            text="Please provide a description after /generate (e.g., /generate A cat in a tree)",
+            text="Please provide a description after /draw (e.g., /draw A cat in a tree)",
         )
         return
 
     redis_client = None
+    lock_acquired = False
     try:
         redis_client = await init_redis()
-        xai_client = Client(api_key=settings.GROK_API_KEY, timeout=settings.GROK_TIMEOUT_SECONDS)
+        lock_acquired = await _acquire_image_op_lock(redis_client, update)
+        if not lock_acquired:
+            return
+
         conversation_key = _conversation_key(
             update.message.chat.id, update.message.message_thread_id
         )
         conversation = await get_conversation_history(redis_client, conversation_key)
-        conversation.append({"role": "user", "content": f"/generate {prompt}"})
+        conversation.append({"role": "user", "content": f"/draw {prompt}"})
 
-        response = xai_client.image.sample(
-            model=settings.GROK_IMAGE_MODEL,
-            prompt=prompt,
-            image_format=settings.GROK_IMAGE_FORMAT,
+        image_bytes = await image_backend.generate_image(
+            prompt,
+            width=settings.QWEN_IMAGE_WIDTH,
+            height=settings.QWEN_IMAGE_HEIGHT,
+            steps=settings.QWEN_IMAGE_STEPS,
         )
-        logger.info("Generated image with revised prompt: %s", response.prompt)
-
-        conversation.append(
-            {
-                "role": "assistant",
-                "content": f"Generated image: {response.url} (Revised prompt: {response.prompt})",
-            }
-        )
-        await save_conversation_history(redis_client, conversation_key, conversation)
-        await _reply(update, photo=response.url)
-    except Exception as e:
-        logger.error("Error processing /generate command: %s", e)
-        await _reply(update, text=f"Error generating image: {e}")
-    finally:
-        if redis_client:
-            await _close_redis(redis_client)
-
-
-async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shared implementation for /draw (low quality) and /gooddraw (auto quality)."""
-    if update.message is None:
-        return
-    command = (update.message.text or "/draw").split()[0].split("@")[0].lstrip("/").lower()
-    prompt = _query_from_args(context)
-    quality = (
-        settings.OPENAI_IMAGE_HIGH_QUALITY
-        if command == "gooddraw"
-        else settings.OPENAI_IMAGE_QUALITY
-    )
-    logger.info(
-        "Received /%s command from chat ID: %s, thread ID: %s, prompt: %s",
-        command,
-        update.message.chat.id,
-        update.message.message_thread_id,
-        prompt,
-    )
-    if not await require_whitelist(update):
-        return
-    if not prompt:
-        await _reply(
-            update,
-            text=f"Please provide a description after /{command} "
-            f"(e.g., /{command} A cute baby sea otter)",
-        )
-        return
-
-    redis_client = None
-    try:
-        redis_client = await init_redis()
-        openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        conversation_key = _conversation_key(
-            update.message.chat.id, update.message.message_thread_id
-        )
-        conversation = await get_conversation_history(redis_client, conversation_key)
-        conversation.append({"role": "user", "content": f"/{command} {prompt}"})
-
-        response = await openai_client.images.generate(
-            model=settings.OPENAI_IMAGE_MODEL,
-            prompt=prompt,
-            n=1,
-            size=settings.OPENAI_IMAGE_SIZE,
-            quality=quality,
-            moderation=settings.OPENAI_IMAGE_MODERATION,
-        )
-        image_bytes = base64.b64decode(response.data[0].b64_json)
 
         conversation.append({"role": "assistant", "content": f"Generated image with prompt: {prompt}"})
         await save_conversation_history(redis_client, conversation_key, conversation)
         await _reply(update, photo=image_bytes)
+    except ImageBackendError as e:
+        logger.error("Image backend error for /draw: %s", e)
+        await _reply(update, text=f"Error generating image: {e}")
     except Exception as e:
-        logger.error("Error processing /%s command: %s", command, e)
+        logger.error("Error processing /draw command: %s", e)
         await _reply(update, text=f"Error generating image: {e}")
     finally:
-        if redis_client:
+        if redis_client is not None:
+            if lock_acquired:
+                await redis_client.delete(IMAGE_OP_LOCK_KEY)
             await _close_redis(redis_client)
 
 
 async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shared implementation for /edit and /goodedit (photo captions)."""
+    """/edit <prompt> as a photo caption - image editing with Qwen Image 2.1."""
     global telegram_app
     if update.message is None:
         return
@@ -456,21 +430,18 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     match = _EDIT_COMMAND_PATTERN.match(caption)
     if not match:
         return
-    command = match.group("command").lower()
 
     # Preserve the existing guard: skip while Telegram still has queued updates.
     webhook_info = await telegram_app.bot.get_webhook_info()
     if webhook_info.pending_update_count > 1:
         logger.info(
-            "Pending updates found: %s. Skipping /%s.",
+            "Pending updates found: %s. Skipping /edit.",
             webhook_info.pending_update_count,
-            command,
         )
         return
 
     logger.info(
-        "Received /%s command from chat ID: %s, thread ID: %s, caption: %s",
-        command,
+        "Received /edit command from chat ID: %s, thread ID: %s, caption: %s",
         update.message.chat.id,
         update.message.message_thread_id,
         caption,
@@ -479,30 +450,28 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Strip the command (and optional @username) from the caption to get the prompt.
-    if caption.lower().startswith(f"/{command}@{settings.BOT_USERNAME.lower()}"):
-        prompt = caption[len(f"/{command}@{settings.BOT_USERNAME}"):].strip()
+    if caption.lower().startswith(f"/edit@{settings.BOT_USERNAME.lower()}"):
+        prompt = caption[len(f"/edit@{settings.BOT_USERNAME}"):].strip()
     else:
-        prompt = caption[len(f"/{command}"):].strip()
+        prompt = caption[len("/edit"):].strip()
+    if not prompt:
+        await _reply(
+            update,
+            text=(
+                "Please add a description after /edit "
+                "(e.g., attach a photo captioned: /edit make it night)"
+            ),
+        )
+        return
     photo = update.message.photo[-1]
 
-    is_good = command == "goodedit"
-    quality = settings.OPENAI_EDIT_HIGH_QUALITY if is_good else settings.OPENAI_EDIT_QUALITY
-
     redis_client = None
+    lock_acquired = False
     try:
         redis_client = await init_redis()
-        if redis_client is not None:
-            # Single-flight lock so concurrent edits do not overlap.
-            lock_acquired = await redis_client.set(
-                "is_editing", "1", nx=True, ex=settings.IMAGE_EDIT_LOCK_TTL_SECONDS
-            )
-            if not lock_acquired:
-                logger.info("Another edit is in progress, skipping this request")
-                return
-        else:
-            logger.warning("Redis is not available, proceeding without edit lock")
-
-        openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        lock_acquired = await _acquire_image_op_lock(redis_client, update)
+        if not lock_acquired:
+            return
 
         file = await photo.get_file()
         async with aiohttp.ClientSession() as session:
@@ -511,29 +480,20 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     raise RuntimeError(f"Failed to download image: HTTP {resp.status}")
                 image_data = await resp.read()
 
-        image_file = io.BytesIO(image_data)
-        image_file.name = "image.png"
-
-        edit_kwargs = {
-            "model": settings.OPENAI_IMAGE_MODEL,
-            "image": image_file,
-            "prompt": prompt,
-            "n": 1,
-            "quality": quality,
-            "size": settings.OPENAI_IMAGE_SIZE,
-        }
-        if is_good:
-            edit_kwargs["input_fidelity"] = settings.OPENAI_EDIT_HIGH_FIDELITY
-        response = await openai_client.images.edit(**edit_kwargs)
-
-        image_bytes = base64.b64decode(response.data[0].b64_json)
+        image_bytes = await image_backend.edit_image(
+            image_data, prompt, steps=settings.QWEN_EDIT_STEPS
+        )
         await _reply(update, photo=image_bytes)
+    except ImageBackendError as e:
+        logger.error("Image backend error for /edit: %s", e)
+        await _reply(update, text=f"Error editing image: {e}")
     except Exception as e:
-        logger.error("Error processing /%s command: %s", command, e)
+        logger.error("Error processing /edit command: %s", e)
         await _reply(update, text=f"Error editing image: {e}")
     finally:
         if redis_client is not None:
-            await redis_client.delete("is_editing")
+            if lock_acquired:
+                await redis_client.delete(IMAGE_OP_LOCK_KEY)
             await _close_redis(redis_client)
 
 
@@ -551,8 +511,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("start", start))
     telegram_app.add_handler(CommandHandler("ask", ask))
     telegram_app.add_handler(CommandHandler("web", web))
-    telegram_app.add_handler(CommandHandler("generate", generate))
-    telegram_app.add_handler(CommandHandler(["draw", "gooddraw"], generate_image))
+    telegram_app.add_handler(CommandHandler("draw", draw))
     telegram_app.add_handler(
         MessageHandler(
             filters.PHOTO

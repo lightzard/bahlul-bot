@@ -1,6 +1,23 @@
 # BahlulBot
 
-BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with FastAPI and hosted on Vercel. It responds to user messages and commands in private and group chats, leveraging the DeepSeek API (OpenAI-compatible) for intelligent responses. The bot also supports image generation via xAI's Grok image model and image editing/drawing via OpenAI. The bot supports conversation context, maintaining a history of interactions to provide coherent responses.
+BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with FastAPI and hosted on Vercel. It responds to user messages and commands in private and group chats, leveraging the DeepSeek API (OpenAI-compatible) for intelligent responses. Image generation (`/draw`) and image editing (`/edit`) run on **Qwen Image 2.1** (GGUF) through an external RunPod Serverless GPU worker running ComfyUI. The bot supports conversation context, maintaining a history of interactions to provide coherent responses.
+
+## Architecture
+
+```
+Telegram -> FastAPI webhook (api/app.py on Vercel)
+         -> api/image_backend (provider abstraction)
+         -> RunPod Serverless endpoint (runpod/ in this repo)
+         -> ComfyUI + UnetLoaderGGUF
+         -> Qwen Image 2.1 GGUF weights (cached from Hugging Face)
+         -> image bytes back to Telegram
+```
+
+The Vercel app stays lightweight — it never executes the model. Hugging Face
+([KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF](https://huggingface.co/KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF))
+is only the storage/source for the weights; the worker downloads them once to
+a RunPod Network Volume. See [runpod/README.md](runpod/README.md) for the full
+GPU backend deployment guide.
 
 ## Features
 
@@ -10,7 +27,7 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 - **Webhook-Based**: Uses FastAPI to handle Telegram webhook updates, optimized for Vercel’s serverless environment.
 - **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-flash`) for generating chat responses.
 - **Live Web Search**: Selectively augments freshness-sensitive questions (news, weather, prices, latest versions, etc.) with Tavily search results, cached in Redis and capped by a per-user daily quota. Use `/web <question>` to force a live search.
-- **xAI Image Generation**: Uses xAI's Grok image model (`grok-2-image`) via the xAI SDK for the `/generate` command.
+- **Image Generation & Editing (Qwen Image 2.1)**: `/draw <description>` generates images from text; captioning a photo with `/edit <description>` edits it. Both run on a RunPod Serverless GPU worker (scale-to-zero) via the provider abstraction in `api/image_backend/`.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
 
 ## Requirements
@@ -21,16 +38,16 @@ BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with Fas
 - `httpx`: For asynchronous HTTP requests (used internally by SDKs).
 - `uvicorn`: For running the FastAPI application.
 - `redis`: For storing conversation history in a Redis database.
-- `openai`: For chat via the DeepSeek API (OpenAI-compatible) and for OpenAI image commands.
-- `aiohttp`: For downloading image files during image editing.
-- `xai-sdk`: For xAI Grok image generation (`/generate`).
+- `openai`: For chat via the DeepSeek API (OpenAI-compatible).
+- `aiohttp`: For talking to the RunPod image backend and downloading Telegram photos.
 
 ### Environment Variables
 Secrets and access control are configured through environment variables; all other configuration lives in `api/settings.py`.
 - `TELEGRAM_TOKEN`: Your Telegram bot token from `@BotFather`.
 - `DEEPSEEK_API_KEY`: Your DeepSeek API key (see https://platform.deepseek.com for details).
-- `GROK_API_KEY`: Your xAI Grok API key, required for `/generate` image generation (see https://x.ai/api for details).
-- `OPENAI_API_KEY`: Your OpenAI API key, required for `/draw`, `/gooddraw`, `/edit`, and `/goodedit`.
+- `RUNPOD_API_KEY`: Your RunPod API key, required for `/draw` and `/edit` (see [runpod/README.md](runpod/README.md) to deploy the backend first).
+- `RUNPOD_ENDPOINT_ID`: Your RunPod Serverless endpoint ID for the Qwen Image 2.1 worker.
+- `IMAGE_BACKEND`: Optional. `runpod` (default) or `dummy` (offline stub for tests).
 - `TAVILY_API_KEY`: Your Tavily API key, required to enable live web search (see https://www.tavily.com). Optional—chat works without it, but automatic recency search is disabled.
 - `WHITELIST_IDS`: Comma-separated chat or user IDs allowed to use the bot (e.g., `123456789,987654321`). If unset or empty, nobody can use the bot.
 - `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash). This is a secret too, so it stays in the environment.
@@ -48,7 +65,7 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
 - `WEB_SEARCH_DAILY_LIMIT`: Maximum uncached live searches per user per UTC day (default: `50`).
 - `WEB_SEARCH_TIMEOUT_SECONDS`: Timeout for each Tavily request (default: `8`).
 - `WEB_SEARCH_CONTEXT_MAX_CHARS`: Cap for the search context injected into DeepSeek (default: `8000`).
-- Image settings: model names, output size, quality, moderation, and the edit lock TTL for `/generate`, `/draw`, `/gooddraw`, `/edit`, and `/goodedit`.
+- Image settings (`/draw`, `/edit`): backend timeout/polling, the global image single-flight lock TTL, and default width/height/steps for Qwen Image 2.1 (25 steps, 1024×1024, matching the official ComfyUI templates).
 - `BOT_USERNAME`: Used to recognize commands such as `/edit@BahlulBot` (default: `BahlulBot`).
 
 ## Setup Instructions
@@ -60,54 +77,57 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
    ```
 
 2. **Install Dependencies**
-   Ensure you have Python 3.8+ installed. Install the required packages:
+   Ensure you have Python 3.10+ installed. Install the required packages:
    ```bash
    pip install -r requirements.txt
-   ```
-    The `requirements.txt` should contain:
+    ```
+    The `requirements.txt` contains:
     ```
     fastapi
     python-telegram-bot>=20.0
     httpx
     uvicorn
     redis
-    xai-sdk==1.0.1
     aiohttp
     openai
     ```
 
-3. **Set Up a Redis Instance**
+3. **Deploy the Image Backend (RunPod)**
+   - Follow [runpod/README.md](runpod/README.md): build and push the worker image, create a Network Volume and a Serverless endpoint (Active Workers 0, Max Workers 1, idle timeout 300–600 s), then note your endpoint ID and RunPod API key.
+   - The weights (Qwen Image 2.1 GGUF + text encoder + VAE) are pulled once from the public Hugging Face repo to the volume — nothing is re-uploaded or re-downloaded per request.
+
+4. **Set Up a Redis Instance**
    - Sign up for a free Redis database at https://upstash.com/.
    - Create a new Redis database and copy the `REDIS_URL` (e.g., `rediss://:<token>@<host>:<port>`).
-   - This is used for storing conversation history to enable contextual responses.
+   - This is used for storing conversation history to enable contextual responses, plus the image single-flight lock.
 
-4. **Configure Secrets (Environment Variables)**
+5. **Configure Secrets (Environment Variables)**
    - In Vercel, go to Dashboard > Project > Settings > Environment Variables.
    - Add the secrets (and optionally `WHITELIST_IDS`):
      - `TELEGRAM_TOKEN`: Your bot token from `@BotFather`.
      - `DEEPSEEK_API_KEY`: Your DeepSeek API key.
-     - `GROK_API_KEY`: Your xAI Grok API key (required for `/generate`).
-     - `OPENAI_API_KEY`: Your OpenAI API key (required for `/draw`, `/gooddraw`, `/edit`, `/goodedit`).
+     - `RUNPOD_API_KEY`: Your RunPod API key (required for `/draw` and `/edit`).
+     - `RUNPOD_ENDPOINT_ID`: Your RunPod Serverless endpoint ID.
      - `REDIS_URL`: The Redis connection URL from Upstash.
      - `TAVILY_API_KEY`: (Optional) Your Tavily API key for live web search (https://www.tavily.com). Automatic recency search is disabled if omitted.
      - `WHITELIST_IDS`: (Optional) Comma-separated chat or user IDs allowed to use the bot. If unset, nobody can use it.
    - Edit `api/settings.py` for model names, limits, and other non-secret options.
 
-5. **Deploy to Vercel**
+6. **Deploy to Vercel**
    - Connect your GitHub repository to Vercel.
-   - Deploy the `api/app.py` endpoint.
+   - Deploy the `api/app.py` endpoint. `vercel.json` sets `maxDuration: 300` (seconds) so image jobs (including a RunPod cold start) fit in one function invocation. If your Vercel plan caps function duration lower (e.g., 60 s), lower `IMAGE_BACKEND_TIMEOUT_SECONDS` in `api/settings.py` accordingly and expect cold-start requests to fail.
    - Set the webhook for Telegram:
      ```bash
-     curl -X POST "https://api.telegram.org/bot<TELEGRAM_TOKEN>/setWebhook?url=https://<your-vercel-app>.vercel.app/webhook"
+     curl -X POST “https://api.telegram.org/bot<TELEGRAM_TOKEN>/setWebhook?url=https://<your-vercel-app>.vercel.app/webhook”
      ```
 
-6. **Configure Telegram Bot**
+7. **Configure Telegram Bot**
    - In Telegram, chat with `@BotFather`:
      - Create a bot and get the `TELEGRAM_TOKEN`.
      - Disable privacy mode for group chats: `/mybots` > Select your bot > Bot Settings > Group Privacy > Turn off.
    - Add the bot to a group and make it an admin (Settings > Administrators > Add Admin > `@BahlulBot` > Grant “Send Messages”).
 
-7. **Test the Bot**
+8. **Test the Bot**
    - **Private Chat**:
      - Send: `/ask What is the capital of France?`
      - Expected: “The capital of France is Paris.”
@@ -117,6 +137,10 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
      - Expected: A current answer with numbered sources like `[1]` and a `Sources:` list (triggers live web search).
      - Send: `/web What is happening in the news today?`
      - Expected: A forced live-search answer regardless of automatic detection.
+     - Send: `/draw a cat astronaut, cinematic photo`
+     - Expected: a photo reply (first request after idle may take a few minutes while the GPU worker cold-starts).
+     - Attach a photo captioned: `/edit make it night`
+     - Expected: an edited version of the photo.
    - **Group Chat** (with privacy mode off and bot as admin):
      - Send: `/ask What is AI?`
      - Expected: “AI is…”
@@ -229,10 +253,14 @@ This performs a single basic search for `"latest AI news today"`, prints the top
   - If you see a model-not-found error, confirm `deepseek-flash` is enabled for your account, or change `DEEPSEEK_MODEL` in `api/settings.py` to a valid model ID.
   - Ensure `openai` is installed (`pip show openai`).
 
-- **Grok Image Generation Issues** (`/generate`):
-  - Verify `GROK_API_KEY` (see https://x.ai/api).
-  - Check logs for errors from xAI SDK interactions.
-  - Ensure `xai-sdk` is installed (`pip show xai-sdk` should show version `1.0.1`).
+- **Image Commands Failing** (`/draw`, `/edit`):
+  - Verify `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` are set in Vercel.
+  - Check logs for `Image backend error` / `RunPod job ... ended as FAILED`.
+  - Check the worker logs in the RunPod console (endpoint → Logs) — the error string from ComfyUI is included in the bot's error reply.
+  - `Image backend is not configured` → the two env vars above are missing.
+  - First request after idle can take several minutes (GPU cold start). Subsequent requests reuse the warm worker for the configured idle window (5–10 min).
+  - If the worker is busy you will get an "I'm still busy with the previous image request" reply — retry shortly.
+  - See [runpod/README.md](runpod/README.md) for GPU-worker-side troubleshooting (OOM, GGUF loader errors, first-boot downloads).
 
 ## License
 
