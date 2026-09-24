@@ -25,6 +25,12 @@ They are downloaded **once** into a Network Volume and reused by every later
 cold start — nothing is re-downloaded per request, and the weights are never
 re-uploaded anywhere.
 
+**Generation recipe** (required — do not "simplify" back to euler/simple,
+which produces poor results with this model): sampler `er_sde`, scheduler
+`beta`, 25+ steps, `qwen3vl_8b_int8_convrot` text encoder. These are baked
+into `workflows/*.json`; the bot's step count is configurable via
+`api/settings.py` (`QWEN_IMAGE_STEPS`, default 25).
+
 Runtime stack: **ComfyUI** (commit-pinned in the Dockerfile) +
 **[leejet/ComfyUI-GGUF](https://github.com/leejet/ComfyUI-GGUF)**. The leejet
 fork is required — the older city96 version fails on this model with
@@ -73,6 +79,8 @@ Optionally set worker env vars (all have sensible defaults):
 | `MODEL_GGUF` | `qwen-image-2.1-Q4_K_M.gguf` | pick another quant (e.g. `qwen-image-2.1-Q8_0.gguf`) |
 | `MODEL_TEXT_ENCODER` | `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | encoder file |
 | `MODEL_VAE` | `vae/qwen_image_2.1_vae_bf16.safetensors` | VAE file |
+| `MODEL_LORA` | *(empty)* | Optional LoRA path relative to `MODEL_CACHE_DIR`, e.g. `qwen-lora.safetensors`. Uploaded manually (see below); empty = disabled |
+| `MODEL_LORA_STRENGTH` | `1.0` | LoRA strength |
 | `HF_REVISION` | *(latest)* | pin a repo revision |
 | `MODEL_CACHE_DIR` | `/runpod-volume/qwen-image-2.1` | where weights live |
 | `COMFYUI_LOWVRAM` | `0` | set `1` to pass `--lowvram` to ComfyUI |
@@ -132,6 +140,62 @@ With Active Workers 0 / Max Workers 1 you pay:
 - GPU time only when jobs run (community RTX 4090 ≈ $0.34–0.44/hr secure
   ≈ $0.69/hr). A warm 60 s job ≈ $0.01; a cold start adds ~$0.02–0.05.
 - RunPod serverless has no per-request surcharge beyond GPU time.
+
+## Using a LoRA
+
+The worker supports one optional LoRA applied on top of the GGUF diffusion
+model (`LoraLoaderModelOnly` → strength 1.0 by default).
+
+### Method 1 — `fetch_lora` job (no pod needed, recommended)
+
+The serverless worker itself mounts the volume, so it can pull the file from
+any URL — including Google Drive:
+
+1. In Google Drive: **Share** `qwen-lora.safetensors` → *Anyone with the
+   link* → set general access to **Anyone on the internet** → copy the link.
+2. Run one job (same PowerShell pattern as the `test` task; note the
+   required `input` wrapper — the full request body is shown):
+   ```json
+   {"input": {"task": "fetch_lora", "url": "https://drive.google.com/file/d/FILE_ID/view?usp=sharing"}}
+   ```
+3. Expect `{"ok": true, "filename": "qwen-lora.safetensors", "size_bytes": ...}`.
+
+Notes:
+
+- The worker rewrites Drive share links to a direct-download URL
+  automatically. Plain direct URLs (S3/R2 presigned, GitHub release assets,
+  any `https://...safetensors`) work too.
+- The job records the choice in `lora.txt` **on the volume**, so the LoRA
+  stays active across cold starts with no endpoint env changes. Run another
+  `fetch_lora` with a new URL to swap LoRAs; run `{"input": {"task": "lora_off"}}`
+  to disable (also deletes the marker).
+- Validation built in: an HTML page instead of the file (wrong Drive
+  sharing settings) or a non-safetensors payload fails with a clear error;
+  5 GB size cap.
+- The fetch job runs on a live worker, so it costs a few minutes of GPU
+  time (the file transfer itself is usually under a minute).
+
+### Method 2 — temporary GPU/CPU pod + runpodctl
+
+If you prefer pushing the file yourself:
+
+1. RunPod Console → Pods → Deploy, any cheap community GPU or CPU instance
+   (spot), in the **same data center as your Network Volume**, and **attach
+   the volume** when creating the pod.
+2. Copy the file to `/runpod-volume/qwen-image-2.1/qwen-lora.safetensors`
+   (`runpodctl send qwen-lora.safetensors` from your machine, or SSH/SFTP).
+3. Terminate the pod (you pay only for the minutes it existed).
+4. Set endpoint env `MODEL_LORA=qwen-lora.safetensors` and save.
+
+### Precedence & behavior
+
+- `MODEL_LORA` env (if set) wins over the `lora.txt` marker.
+- A configured LoRA whose file is missing logs a loud warning and the
+  worker runs **without** it instead of crashing.
+- The `test` task's output includes `"lora": "<name>"` (or `"none"`) so you
+  can verify the active mode remotely.
+- If the Network Volume is ever recreated, the models re-download
+  automatically on first boot; the LoRA does not — re-run `fetch_lora`.
 
 ## Troubleshooting
 

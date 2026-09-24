@@ -6,6 +6,15 @@
     },
     "_note": "GGUF loader from leejet/ComfyUI-GGUF (city96's version rejects this model)"
   },
+  "20": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": ["10", 0],
+      "lora_name": "qwen-lora.safetensors",
+      "strength_model": 1.0
+    },
+    "_note": "Optional LoRA; the handler removes this node and rewires the model input when MODEL_LORA is unset. Applied before QwenImage21Cache so patches land on the weights first."
+  },
   "11": {
     "class_type": "CLIPLoader",
     "inputs": {
@@ -40,7 +49,7 @@
   "19": {
     "class_type": "QwenImage21Cache",
     "inputs": {
-      "model": ["10", 0],
+      "model": ["20", 0],
       "device": "auto",
       "dtype": "default"
     }
@@ -55,11 +64,11 @@
       "seed": 0,
       "steps": 25,
       "cfg": 1.0,
-      "sampler_name": "euler",
-      "scheduler": "simple",
+      "sampler_name": "er_sde",
+      "scheduler": "beta",
       "denoise": 1.0
     },
-    "_note": "latent comes from TextEncodeQwenImage21 output 2 (latent sized to the reference image)"
+    "_note": "er_sde + beta + 25 steps is the required recipe; latent comes from TextEncodeQwenImage21 output 2 (latent sized to the reference image)"
   },
   "16": {
     "class_type": "VAEDecode",
