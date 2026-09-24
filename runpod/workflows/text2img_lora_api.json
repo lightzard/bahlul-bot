@@ -1,10 +1,20 @@
 {
   "10": {
-    "class_type": "UnetLoaderGGUF",
+    "class_type": "UNETLoader",
     "inputs": {
-      "unet_name": "qwen-image-2.1-Q4_K_M.gguf"
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
     },
-    "_note": "Uncensored GGUF stack for /draw — no LoRA is ever applied on this path"
+    "_note": "Base int8 safetensors stack for /drawlora — LoRA keys match this checkpoint's naming"
+  },
+  "20": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": ["10", 0],
+      "lora_name": "qwen-lora.safetensors",
+      "strength_model": 1.0
+    },
+    "_note": "The handler patches lora_name/strength from the volume marker; the job fails fast when no LoRA is active"
   },
   "11": {
     "class_type": "CLIPLoader",
@@ -40,7 +50,7 @@
   "15": {
     "class_type": "KSampler",
     "inputs": {
-      "model": ["10", 0],
+      "model": ["20", 0],
       "positive": ["13", 0],
       "negative": ["13", 1],
       "latent_image": ["14", 0],
@@ -64,7 +74,7 @@
     "class_type": "SaveImage",
     "inputs": {
       "images": ["16", 0],
-      "filename_prefix": "qwen_image"
+      "filename_prefix": "qwen_image_lora"
     }
   }
 }

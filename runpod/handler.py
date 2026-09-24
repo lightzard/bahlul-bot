@@ -6,12 +6,17 @@ a RunPod Network Volume so later cold starts reuse them — and ComfyUI runs as
 an in-container subprocess driven through its HTTP API.
 
 Job input (JSON):
-    task:           "text2img" | "edit" | "test"
+    task:           "text2img" | "text2img_lora" | "edit" | "edit_lora" |
+                    "fetch_lora" | "lora_off" | "test"
     prompt:         str
-    image_base64:   str   (edit only)
-    width, height:  int   (text2img only, default 1024)
+    image_base64:   str   (edit / edit_lora only)
+    width, height:  int   (text2img / text2img_lora only, default 1024)
     steps:          int   (default 25, clamped to 1..50)
     seed:           int   (optional; random when omitted)
+
+The base tasks run the uncensored GGUF (no LoRA ever); the *_lora tasks run
+the base int8 safetensors checkpoint + the active LoRA and fail fast when no
+LoRA is loaded (see fetch_lora / runpod/README.md).
 
 Job output:
     {"image_base64": "<png bytes base64>"} on success.
@@ -46,6 +51,13 @@ HF_REVISION = os.getenv("HF_REVISION") or None
 MODEL_GGUF = os.getenv("MODEL_GGUF", "qwen-image-2.1-Q4_K_M.gguf")
 MODEL_TEXT_ENCODER = os.getenv("MODEL_TEXT_ENCODER", "text_encoders/qwen3vl_8b_int8_convrot.safetensors")
 MODEL_VAE = os.getenv("MODEL_VAE", "vae/qwen_image_2.1_vae_bf16.safetensors")
+
+# Second diffusion model for the *lora tasks: the base int8 checkpoint whose
+# module naming matches LoRAs trained on the official Qwen-Image-2.1.
+DIFFUSION_LORA_REPO = os.getenv("DIFFUSION_LORA_REPO", "Comfy-Org/Qwen-Image-2.1")
+MODEL_DIFFUSION_LORA = os.getenv(
+    "MODEL_DIFFUSION_LORA", "diffusion_models/qwen_image_2.1_int8_convrot.safetensors"
+)
 
 # Optional LoRA on top of the diffusion model. MODEL_LORA is a path relative
 # to MODEL_CACHE_DIR (uploaded manually to the volume, e.g. via a temporary
@@ -142,22 +154,23 @@ def _link_model(target: Path, comfy_subdir: str, *, fallback_copy: bool) -> None
 
 
 def _download_models() -> None:
-    """Fetch the three model files from HF once; no-op when already cached."""
-    files = {
-        MODEL_GGUF: "diffusion_models",
-        MODEL_TEXT_ENCODER: "text_encoders",
-        MODEL_VAE: "vae",
-    }
-    for repo_file, comfy_dir in files.items():
+    """Fetch the model files from HF once; no-op when already cached."""
+    files = [
+        (HF_REPO_ID, MODEL_GGUF, "diffusion_models"),
+        (DIFFUSION_LORA_REPO, MODEL_DIFFUSION_LORA, "diffusion_models"),
+        (HF_REPO_ID, MODEL_TEXT_ENCODER, "text_encoders"),
+        (HF_REPO_ID, MODEL_VAE, "vae"),
+    ]
+    for repo_id, repo_file, comfy_dir in files:
         target = Path(MODEL_CACHE_DIR) / repo_file
         if target.exists():
             logger.info("Model file already cached: %s", target)
         else:
-            logger.info("Downloading %s from %s ...", repo_file, HF_REPO_ID)
+            logger.info("Downloading %s from %s ...", repo_file, repo_id)
             hf_hub_download(
-                repo_id=HF_REPO_ID,
+                repo_id=repo_id,
                 filename=repo_file,
-                revision=HF_REVISION,
+                revision=HF_REVISION if repo_id == HF_REPO_ID else None,
                 local_dir=MODEL_CACHE_DIR,
             )
         _link_model(target, comfy_dir, fallback_copy=False)
@@ -315,15 +328,22 @@ def _find_node(workflow: dict, class_type: str):
     return matches[0]
 
 
-def _set_model_files(workflow: dict) -> None:
-    _find_node(workflow, "UnetLoaderGGUF")[1]["inputs"]["unet_name"] = Path(MODEL_GGUF).name
+def _set_model_files(workflow: dict, lora_stack: bool) -> None:
+    if lora_stack:
+        _find_node(workflow, "UNETLoader")[1]["inputs"]["unet_name"] = Path(MODEL_DIFFUSION_LORA).name
+    else:
+        _find_node(workflow, "UnetLoaderGGUF")[1]["inputs"]["unet_name"] = Path(MODEL_GGUF).name
     _find_node(workflow, "CLIPLoader")[1]["inputs"]["clip_name"] = Path(MODEL_TEXT_ENCODER).name
     _find_node(workflow, "VAELoader")[1]["inputs"]["vae_name"] = Path(MODEL_VAE).name
-    _apply_lora(workflow)
+    _apply_lora(workflow, required=lora_stack)
 
 
-def _apply_lora(workflow: dict) -> None:
-    """Patch or bypass the LoraLoaderModelOnly node based on bootstrap state."""
+def _apply_lora(workflow: dict, required: bool = False) -> None:
+    """Patch (or bypass) LoraLoaderModelOnly nodes based on bootstrap state.
+
+    Lora-stack workflows always require an active LoRA; base workflows ship
+    without a LoRA node and are never affected by the marker/env.
+    """
     lora_ids = [
         nid for nid, node in workflow.items()
         if isinstance(node, dict) and node.get("class_type") == "LoraLoaderModelOnly"
@@ -334,8 +354,17 @@ def _apply_lora(workflow: dict) -> None:
             inputs["lora_name"] = _lora_name
             inputs["strength_model"] = MODEL_LORA_STRENGTH
         return
+    if required and lora_ids:
+        raise RuntimeError(
+            "This task needs a LoRA but none is active — run the fetch_lora "
+            "task first (see runpod/README.md)"
+        )
     # Disabled: drop the node and rewire its consumers straight to the loader.
-    loader_id = _find_node(workflow, "UnetLoaderGGUF")[0]
+    loader_ids = [
+        nid for nid, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") in ("UnetLoaderGGUF", "UNETLoader")
+    ]
+    loader_id = loader_ids[0]
     for nid in lora_ids:
         bypassed = [nid, 0]
         for node in workflow.values():
@@ -347,9 +376,9 @@ def _apply_lora(workflow: dict) -> None:
         workflow.pop(nid, None)
 
 
-def _build_text2img(job_input: dict) -> dict:
-    workflow = _load_template("text2img_api.json")
-    _set_model_files(workflow)
+def _build_text2img(job_input: dict, lora: bool = False) -> dict:
+    workflow = _load_template("text2img_lora_api.json" if lora else "text2img_api.json")
+    _set_model_files(workflow, lora_stack=lora)
 
     width = int(job_input.get("width") or 1024)
     height = int(job_input.get("height") or 1024)
@@ -366,7 +395,7 @@ def _build_text2img(job_input: dict) -> dict:
     return workflow
 
 
-def _build_edit(job_input: dict, job_id: str) -> tuple[dict, str]:
+def _build_edit(job_input: dict, job_id: str, lora: bool = False) -> tuple[dict, str]:
     image_b64 = job_input.get("image_base64")
     if not image_b64:
         raise ValueError("task 'edit' requires 'image_base64'")
@@ -382,8 +411,8 @@ def _build_edit(job_input: dict, job_id: str) -> tuple[dict, str]:
     filename = f"rp_{job_id}.jpg"
     (input_dir / filename).write_bytes(image_bytes)
 
-    workflow = _load_template("edit_api.json")
-    _set_model_files(workflow)
+    workflow = _load_template("edit_lora_api.json" if lora else "edit_api.json")
+    _set_model_files(workflow, lora_stack=lora)
     _find_node(workflow, "LoadImage")[1]["inputs"]["image"] = filename
 
     encode = _find_node(workflow, "TextEncodeQwenImage21")[1]["inputs"]
@@ -473,8 +502,8 @@ def handler(job):
             return {
                 "ok": True,
                 "comfyui_url": COMFYUI_URL,
-                "repo": HF_REPO_ID,
-                "models": [MODEL_GGUF, MODEL_TEXT_ENCODER, MODEL_VAE],
+                "repos": [HF_REPO_ID, DIFFUSION_LORA_REPO],
+                "models": [MODEL_GGUF, MODEL_DIFFUSION_LORA, MODEL_TEXT_ENCODER, MODEL_VAE],
                 "lora": _lora_name or "none",
                 "lora_strength": MODEL_LORA_STRENGTH if _lora_name else None,
                 "cache_dir": MODEL_CACHE_DIR,
@@ -487,14 +516,15 @@ def handler(job):
         if task == "lora_off":
             return _lora_off()
 
-        if task == "text2img":
-            workflow = _build_text2img(job_input)
-        elif task == "edit":
-            workflow, input_file = _build_edit(job_input, job_id)
+        if task in ("text2img", "text2img_lora"):
+            workflow = _build_text2img(job_input, lora=task.endswith("_lora"))
+        elif task in ("edit", "edit_lora"):
+            workflow, input_file = _build_edit(job_input, job_id, lora=task.endswith("_lora"))
         else:
             raise ValueError(
                 f"unknown task: {task!r} "
-                "(expected text2img, edit, test, fetch_lora, or lora_off)"
+                "(expected text2img, text2img_lora, edit, edit_lora, "
+                "test, fetch_lora, or lora_off)"
             )
 
         prompt_id = _submit_workflow(workflow)

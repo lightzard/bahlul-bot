@@ -15,11 +15,19 @@ The model files come from the public Hugging Face repo
 [`KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF`](https://huggingface.co/KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF)
 (duplicate of `abenzerps/Qwen-Image-2.1-Uncensored-GGUF`):
 
-| Role | File | Size |
-|---|---|---:|
-| Diffusion model (GGUF) | `qwen-image-2.1-Q4_K_M.gguf` | 4.6 GiB |
-| Text encoder | `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | 8.7 GiB |
-| VAE | `vae/qwen_image_2.1_vae_bf16.safetensors` | 644 MiB |
+| Role | File | Size | Used by |
+|---|---|---:|---|
+| Diffusion model (GGUF, uncensored) | `qwen-image-2.1-Q4_K_M.gguf` | 4.6 GiB | `text2img`, `edit` |
+| Diffusion model (int8 safetensors, base) | `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` from `Comfy-Org/Qwen-Image-2.1` | 6.8 GiB | `text2img_lora`, `edit_lora` |
+| Text encoder (shared) | `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | 8.7 GiB | all tasks |
+| VAE (shared) | `vae/qwen_image_2.1_vae_bf16.safetensors` | 644 MiB | all tasks |
+
+**Two model stacks** back the bot's four commands: `/draw` and `/edit` always
+use the uncensored GGUF with no LoRA; `/drawlora` and `/editlora` use the
+base int8 checkpoint (whose module naming matches LoRAs trained on the
+official Qwen-Image-2.1) plus the active LoRA. A `*_lora` job fails fast
+with a clear error when no LoRA is loaded. With both diffusion models cached
+(~21 GB), the Network Volume should be **30 GB**.
 
 They are downloaded **once** into a Network Volume and reused by every later
 cold start — nothing is re-downloaded per request, and the weights are never
@@ -79,7 +87,9 @@ Optionally set worker env vars (all have sensible defaults):
 | `MODEL_GGUF` | `qwen-image-2.1-Q4_K_M.gguf` | pick another quant (e.g. `qwen-image-2.1-Q8_0.gguf`) |
 | `MODEL_TEXT_ENCODER` | `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | encoder file |
 | `MODEL_VAE` | `vae/qwen_image_2.1_vae_bf16.safetensors` | VAE file |
-| `MODEL_LORA` | *(empty)* | Optional LoRA path relative to `MODEL_CACHE_DIR`, e.g. `qwen-lora.safetensors`. Uploaded manually (see below); empty = disabled |
+| `DIFFUSION_LORA_REPO` | `Comfy-Org/Qwen-Image-2.1` | HF repo of the int8 checkpoint for the `*_lora` tasks |
+| `MODEL_DIFFUSION_LORA` | `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` | int8 checkpoint file for the `*_lora` tasks |
+| `MODEL_LORA` | *(empty)* | Optional LoRA path relative to `MODEL_CACHE_DIR`, e.g. `qwen-lora.safetensors`. Uploaded via fetch_lora (see below); empty = only the `lora.txt` marker decides |
 | `MODEL_LORA_STRENGTH` | `1.0` | LoRA strength |
 | `HF_REVISION` | *(latest)* | pin a repo revision |
 | `MODEL_CACHE_DIR` | `/runpod-volume/qwen-image-2.1` | where weights live |
@@ -143,8 +153,11 @@ With Active Workers 0 / Max Workers 1 you pay:
 
 ## Using a LoRA
 
-The worker supports one optional LoRA applied on top of the GGUF diffusion
-model (`LoraLoaderModelOnly` → strength 1.0 by default).
+The worker supports one optional LoRA applied on top of the base int8
+diffusion checkpoint (`LoraLoaderModelOnly` → strength 1.0 by default). It
+is used **only** by the `text2img_lora` / `edit_lora` tasks (the bot's
+`/drawlora` and `/editlora` commands); the uncensored GGUF stack never
+applies a LoRA.
 
 ### Method 1 — `fetch_lora` job (no pod needed, recommended)
 

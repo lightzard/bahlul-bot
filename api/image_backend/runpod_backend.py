@@ -25,7 +25,7 @@ class RunPodBackend:
 
     async def generate_image(self, prompt: str, **options) -> bytes:
         job_input = {
-            "task": "text2img",
+            "task": "text2img_lora" if options.get("lora") else "text2img",
             "prompt": prompt,
             "width": options.get("width", settings.QWEN_IMAGE_WIDTH),
             "height": options.get("height", settings.QWEN_IMAGE_HEIGHT),
@@ -39,7 +39,7 @@ class RunPodBackend:
         if not image_bytes:
             raise ImageBackendError("No input image provided for editing")
         job_input = {
-            "task": "edit",
+            "task": "edit_lora" if options.get("lora") else "edit",
             "prompt": prompt,
             "image_base64": base64.b64encode(image_bytes).decode("ascii"),
             "steps": options.get("steps", settings.QWEN_EDIT_STEPS),

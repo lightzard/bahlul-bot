@@ -1064,15 +1064,111 @@ def test_edit_handler_downloads_photo_and_edits():
     print("✓ /edit downloads the photo, edits it, and replies with the result")
 
 
-def test_edit_pattern_matches_only_edit():
-    """The caption regex no longer matches the removed /goodedit command."""
+def _run_backend_call(coro_factory, session):
+    from contextlib import ExitStack
+
+    from api.image_backend import runpod_backend as rb
+
+    stack = ExitStack()
+    for p in _runpod_settings_patches():
+        stack.enter_context(p)
+    stack.enter_context(patch.object(rb.aiohttp, "ClientSession", return_value=session))
+    with stack:
+        return asyncio.run(coro_factory())
+
+
+def test_runpod_backend_lora_task_mapping():
+    """lora=True selects the *_lora tasks; default keeps the base tasks."""
+    import base64
+
+    from api.image_backend import edit_image, generate_image
+
+    def make_session():
+        return _FakeAiohttpSession(
+            posts=[_FakeResponse(200, {"id": "j", "status": "IN_QUEUE"})],
+            gets=[_FakeResponse(200, {"id": "j", "status": "COMPLETED",
+                                      "output": {"image_base64": base64.b64encode(b"png").decode()}})],
+        )
+
+    s1 = make_session()
+    assert _run_backend_call(lambda: generate_image("p", lora=True), s1) == b"png"
+    assert s1.post_calls[0]["json"]["input"]["task"] == "text2img_lora"
+
+    s2 = make_session()
+    assert _run_backend_call(lambda: edit_image(b"img", "p", lora=True), s2) == b"png"
+    assert s2.post_calls[0]["json"]["input"]["task"] == "edit_lora"
+
+    s3 = make_session()
+    _run_backend_call(lambda: generate_image("p"), s3)
+    assert s3.post_calls[0]["json"]["input"]["task"] == "text2img"
+
+
+def test_drawlora_handler_passes_lora_flag():
+    """/drawlora routes through the backend with lora=True."""
+    from api import app as app_module
+    from api.app import drawlora
+
+    fake_redis = FakeRedis()
+    update = _make_telegram_update(text="/drawlora neon style")
+    context = MagicMock()
+    context.args = ["neon", "style"]
+
+    gen = AsyncMock(return_value=b"\x89PNG image bytes")
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.WHITELIST_IDS", {"111"}), \
+         patch("api.image_backend.generate_image", gen):
+        asyncio.run(drawlora(update, context))
+
+    gen.assert_awaited_once()
+    assert gen.await_args.args[0] == "neon style"
+    assert gen.await_args.kwargs.get("lora") is True
+    update.message.reply_photo.assert_awaited_once()
+    saved = json.loads(fake_redis.store["chat:111:main"])
+    assert {"role": "user", "content": "/drawlora neon style"} in saved
+    print("✓ /drawlora passes the lora flag and records history")
+
+
+def test_editlora_caption_routes_to_lora_stack():
+    """/editlora (and /el) photo captions must set lora=True on the backend."""
+    from api import app as app_module
+    from api.app import edit_image
+
+    for caption in ("/editlora make it night", "/el make it night"):
+        fake_redis = FakeRedis()
+        update = _make_photo_update(caption=caption)
+        app_module.telegram_app = MagicMock()
+        app_module.telegram_app.bot.get_webhook_info = AsyncMock(
+            return_value=MagicMock(pending_update_count=0)
+        )
+        download_session = _FakeAiohttpSession(
+            gets=[_FakeResponse(200, None, raw=b"photo-jpeg-bytes")]
+        )
+        edit = AsyncMock(return_value=b"\x89PNG edited bytes")
+        with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+             patch("api.settings.WHITELIST_IDS", {"111"}), \
+             patch.object(app_module.aiohttp, "ClientSession", return_value=download_session), \
+             patch("api.image_backend.edit_image", edit):
+            asyncio.run(edit_image(update, None))
+        edit.assert_awaited_once()
+        assert edit.await_args.kwargs.get("lora") is True, caption
+        assert edit.await_args.args[1] == "make it night", caption
+    print("✓ /editlora and /el captions route to the LoRA stack")
+
+
+def test_edit_pattern_matches_edit_and_editlora():
+    """The caption regex matches /edit, /editlora and shorthands /e, /el only."""
     from api.app import _EDIT_COMMAND_PATTERN
 
-    assert _EDIT_COMMAND_PATTERN.match("/edit make it night")
-    assert _EDIT_COMMAND_PATTERN.match("/Edit@BahlulBot brighter")
+    assert _EDIT_COMMAND_PATTERN.match("/edit make it night").group("command") == "edit"
+    assert _EDIT_COMMAND_PATTERN.match("/editlora brighter").group("command") == "editlora"
+    assert _EDIT_COMMAND_PATTERN.match("/EditLora@BahlulBot brighter").group("command").lower() == "editlora"
+    assert _EDIT_COMMAND_PATTERN.match("/e make it night").group("command") == "e"
+    assert _EDIT_COMMAND_PATTERN.match("/el brighter").group("command") == "el"
+    assert _EDIT_COMMAND_PATTERN.match("/E@BahlulBot brighter").group("command") == "E"
+    assert not _EDIT_COMMAND_PATTERN.match("/eg not a command")
     assert not _EDIT_COMMAND_PATTERN.match("/goodedit make it night")
     assert not _EDIT_COMMAND_PATTERN.match("/generate a cat")
-    print("✓ edit caption pattern matches /edit only")
+    print("✓ edit caption pattern matches /edit, /editlora, /e, /el only")
 
 
 def run_mocked_tests():
@@ -1109,8 +1205,11 @@ def run_mocked_tests():
     test_dummy_backend_returns_png()
     test_draw_handler_replies_with_image_and_lock()
     test_draw_handler_busy_replies_and_skips_backend()
+    test_drawlora_handler_passes_lora_flag()
     test_edit_handler_downloads_photo_and_edits()
-    test_edit_pattern_matches_only_edit()
+    test_editlora_caption_routes_to_lora_stack()
+    test_edit_pattern_matches_edit_and_editlora()
+    test_runpod_backend_lora_task_mapping()
     print("=" * 60)
     print("All mocked tests passed! ✓")
     print("=" * 60)

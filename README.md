@@ -21,13 +21,13 @@ GPU backend deployment guide.
 
 ## Features
 
-- **Command Handling**: Responds to `/start` and `/ask <question>` commands in private and group chats.
+- **Command Handling**: Responds to `/start` and `/ask <question>` commands in private and group chats (shorthands: `/a` for `/ask`).
 - **Text Message Handling**: Processes regular text messages in private chats and group chats (if privacy mode is disabled and the bot is an admin).
 - **Conversation Context**: Stores up to 10 messages per chat (private or group, including topic threads) in a Redis database with a 1-hour expiry, enabling contextual responses from the DeepSeek API.
 - **Webhook-Based**: Uses FastAPI to handle Telegram webhook updates, optimized for Vercel’s serverless environment.
 - **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-flash`) for generating chat responses.
 - **Live Web Search**: Selectively augments freshness-sensitive questions (news, weather, prices, latest versions, etc.) with Tavily search results, cached in Redis and capped by a per-user daily quota. Use `/web <question>` to force a live search.
-- **Image Generation & Editing (Qwen Image 2.1)**: `/draw <description>` generates images from text; captioning a photo with `/edit <description>` edits it. Both run on a RunPod Serverless GPU worker (scale-to-zero) via the provider abstraction in `api/image_backend/`.
+- **Image Generation & Editing (Qwen Image 2.1)**: `/draw <description>` and photo-captioned `/edit <description>` run the uncensored Qwen GGUF; `/drawlora <description>` and `/editlora <description>` run the base int8 checkpoint plus your LoRA. Shorthands: `/d`, `/dl`, `/e`, `/el`. All execute on a RunPod Serverless GPU worker (scale-to-zero) via the provider abstraction in `api/image_backend/`.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
 
 ## Requirements
@@ -139,8 +139,12 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
      - Expected: A forced live-search answer regardless of automatic detection.
      - Send: `/draw a cat astronaut, cinematic photo`
      - Expected: a photo reply (first request after idle may take a few minutes while the GPU worker cold-starts).
+     - Send: `/drawlora a cat astronaut, cinematic photo`
+     - Expected: a photo from the base int8 + LoRA stack (fails with a clear message if no LoRA is loaded on the worker).
      - Attach a photo captioned: `/edit make it night`
      - Expected: an edited version of the photo.
+     - Attach a photo captioned: `/editlora make it night`
+     - Expected: the LoRA-stack edit.
    - **Group Chat** (with privacy mode off and bot as admin):
      - Send: `/ask What is AI?`
      - Expected: “AI is…”
@@ -253,7 +257,7 @@ This performs a single basic search for `"latest AI news today"`, prints the top
   - If you see a model-not-found error, confirm `deepseek-flash` is enabled for your account, or change `DEEPSEEK_MODEL` in `api/settings.py` to a valid model ID.
   - Ensure `openai` is installed (`pip show openai`).
 
-- **Image Commands Failing** (`/draw`, `/edit`):
+- **Image Commands Failing** (`/draw`, `/drawlora`, `/edit`, `/editlora`):
   - Verify `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` are set in Vercel.
   - Check logs for `Image backend error` / `RunPod job ... ended as FAILED`.
   - Check the worker logs in the RunPod console (endpoint → Logs) — the error string from ComfyUI is included in the bot's error reply.

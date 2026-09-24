@@ -32,9 +32,10 @@ logger = logging.getLogger(__name__)
 
 telegram_app = None
 
-# Matches /edit photo captions, with or without the bot username.
+# Matches /edit or /editlora photo captions (or shorthands /e, /el), with or
+# without the bot username (longest alternatives first so they aren't truncated).
 _EDIT_COMMAND_PATTERN = re.compile(
-    rf"^/edit(?:@{settings.BOT_USERNAME})?\b.*",
+    rf"^/(?P<command>editlora|edit|el|e)(?:@{settings.BOT_USERNAME})?\b.*",
     re.IGNORECASE,
 )
 
@@ -188,7 +189,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=(
             "Hello! I'm BahlulBot, powered by DeepSeek. Use /ask <your question> to get a "
             "response, /web <your question> to force a live web search, /draw <description> "
-            "to generate an image, or caption a photo with /edit <description> to edit it. "
+            "or /drawlora <description> to generate an image, or caption a photo with "
+            "/edit or /editlora <description> to edit it. Shorthands: /a, /d, /dl, /e, /el. "
             "You can also send a message in private chat."
         ),
     )
@@ -365,12 +367,23 @@ async def _acquire_image_op_lock(redis_client, update: Update) -> bool:
 
 
 async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/draw - text-to-image with Qwen Image 2.1."""
+    """/draw - text-to-image with the uncensored Qwen GGUF stack."""
+    await _draw_command(update, context, lora=False)
+
+
+async def drawlora(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/drawlora - text-to-image with the base int8 stack + LoRA."""
+    await _draw_command(update, context, lora=True)
+
+
+async def _draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *, lora: bool):
+    command = "drawlora" if lora else "draw"
     if update.message is None:
         return
     prompt = _query_from_args(context)
     logger.info(
-        "Received /draw command from chat type %s, chat ID: %s, prompt: %s",
+        "Received /%s command from chat type %s, chat ID: %s, prompt: %s",
+        command,
         update.message.chat.type,
         update.message.chat.id,
         prompt,
@@ -380,7 +393,7 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not prompt:
         await _reply(
             update,
-            text="Please provide a description after /draw (e.g., /draw A cat in a tree)",
+            text=f"Please provide a description after /{command} (e.g., /{command} A cat in a tree)",
         )
         return
 
@@ -396,23 +409,24 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.message.chat.id, update.message.message_thread_id
         )
         conversation = await get_conversation_history(redis_client, conversation_key)
-        conversation.append({"role": "user", "content": f"/draw {prompt}"})
+        conversation.append({"role": "user", "content": f"/{command} {prompt}"})
 
         image_bytes = await image_backend.generate_image(
             prompt,
             width=settings.QWEN_IMAGE_WIDTH,
             height=settings.QWEN_IMAGE_HEIGHT,
             steps=settings.QWEN_IMAGE_STEPS,
+            lora=lora,
         )
 
         conversation.append({"role": "assistant", "content": f"Generated image with prompt: {prompt}"})
         await save_conversation_history(redis_client, conversation_key, conversation)
         await _reply(update, photo=image_bytes)
     except ImageBackendError as e:
-        logger.error("Image backend error for /draw: %s", e)
+        logger.error("Image backend error for /%s: %s", command, e)
         await _reply(update, text=f"Error generating image: {e}")
     except Exception as e:
-        logger.error("Error processing /draw command: %s", e)
+        logger.error("Error processing /%s command: %s", command, e)
         await _reply(update, text=f"Error generating image: {e}")
     finally:
         if redis_client is not None:
@@ -422,7 +436,7 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/edit <prompt> as a photo caption - image editing with Qwen Image 2.1."""
+    """/edit or /editlora <prompt> as a photo caption - image editing."""
     global telegram_app
     if update.message is None:
         return
@@ -430,18 +444,22 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     match = _EDIT_COMMAND_PATTERN.match(caption)
     if not match:
         return
+    command = match.group("command").lower()
+    lora = command in ("editlora", "el")
 
     # Preserve the existing guard: skip while Telegram still has queued updates.
     webhook_info = await telegram_app.bot.get_webhook_info()
     if webhook_info.pending_update_count > 1:
         logger.info(
-            "Pending updates found: %s. Skipping /edit.",
+            "Pending updates found: %s. Skipping /%s.",
             webhook_info.pending_update_count,
+            command,
         )
         return
 
     logger.info(
-        "Received /edit command from chat ID: %s, thread ID: %s, caption: %s",
+        "Received /%s command from chat ID: %s, thread ID: %s, caption: %s",
+        command,
         update.message.chat.id,
         update.message.message_thread_id,
         caption,
@@ -450,16 +468,16 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Strip the command (and optional @username) from the caption to get the prompt.
-    if caption.lower().startswith(f"/edit@{settings.BOT_USERNAME.lower()}"):
-        prompt = caption[len(f"/edit@{settings.BOT_USERNAME}"):].strip()
+    if caption.lower().startswith(f"/{command}@{settings.BOT_USERNAME.lower()}"):
+        prompt = caption[len(f"/{command}@{settings.BOT_USERNAME}"):].strip()
     else:
-        prompt = caption[len("/edit"):].strip()
+        prompt = caption[len(f"/{command}"):].strip()
     if not prompt:
         await _reply(
             update,
             text=(
-                "Please add a description after /edit "
-                "(e.g., attach a photo captioned: /edit make it night)"
+                f"Please add a description after /{command} "
+                f"(e.g., attach a photo captioned: /{command} make it night)"
             ),
         )
         return
@@ -481,14 +499,14 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 image_data = await resp.read()
 
         image_bytes = await image_backend.edit_image(
-            image_data, prompt, steps=settings.QWEN_EDIT_STEPS
+            image_data, prompt, steps=settings.QWEN_EDIT_STEPS, lora=lora
         )
         await _reply(update, photo=image_bytes)
     except ImageBackendError as e:
-        logger.error("Image backend error for /edit: %s", e)
+        logger.error("Image backend error for /%s: %s", command, e)
         await _reply(update, text=f"Error editing image: {e}")
     except Exception as e:
-        logger.error("Error processing /edit command: %s", e)
+        logger.error("Error processing /%s command: %s", command, e)
         await _reply(update, text=f"Error editing image: {e}")
     finally:
         if redis_client is not None:
@@ -509,9 +527,10 @@ async def initialize_bot():
     await telegram_app.initialize()
 
     telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("ask", ask))
+    telegram_app.add_handler(CommandHandler(["ask", "a"], ask))
     telegram_app.add_handler(CommandHandler("web", web))
-    telegram_app.add_handler(CommandHandler("draw", draw))
+    telegram_app.add_handler(CommandHandler(["draw", "d"], draw))
+    telegram_app.add_handler(CommandHandler(["drawlora", "dl"], drawlora))
     telegram_app.add_handler(
         MessageHandler(
             filters.PHOTO
