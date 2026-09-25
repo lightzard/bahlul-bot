@@ -181,6 +181,14 @@ def _generate(job_input: dict) -> dict:
             raise ValueError(f"invalid message content: {msg!r}")
         clean.append({"role": msg["role"], "content": content})
 
+    # The Qwen3.5 chat template raises "System message must be at the
+    # beginning" for system messages that appear mid-conversation, so merge
+    # any system messages into one leading message regardless of caller order.
+    system_parts = [m["content"] for m in clean if m["role"] == "system"]
+    clean = [m for m in clean if m["role"] != "system"]
+    if system_parts:
+        clean.insert(0, {"role": "system", "content": "\n".join(system_parts)})
+
     try:
         max_tokens = int(job_input.get("max_tokens") or DEFAULT_MAX_TOKENS)
     except (TypeError, ValueError):

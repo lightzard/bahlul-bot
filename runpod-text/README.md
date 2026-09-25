@@ -47,8 +47,8 @@ memory peak under ~5 GB — a single giant static link OOMs small builder VMs.
 ## 1. Build and push the image
 
 ```bash
-docker build -t <your-registry>/hauhaucs-text-runpod:v0.3 -t <your-registry>/hauhaucs-text-runpod:latest ./runpod-text
-docker push <your-registry>/hauhaucs-text-runpod:v0.3
+docker build -t <your-registry>/hauhaucs-text-runpod:v0.4 -t <your-registry>/hauhaucs-text-runpod:latest ./runpod-text
+docker push <your-registry>/hauhaucs-text-runpod:v0.4
 docker push <your-registry>/hauhaucs-text-runpod:latest
 ```
 
@@ -132,6 +132,10 @@ RUNPOD_TEXT_ENDPOINT_ID=<text endpoint id>
 
 ## Troubleshooting
 
+- **`Jinja Exception: System message must be at the beginning`** — the
+  Qwen3.5 chat template rejects system messages placed after conversation
+  turns. The worker (v0.4+) front-merges any system messages before calling
+  llama-server, so callers can pass them in any order.
 - **`unknown model architecture: 'qwen35'`** (v0.1/v0.2) — the prebuilt
   `ghcr.io/ggml-org/llama.cpp:server-cuda-b4738` image predates Qwen3.5.
   Fixed in v0.3+, which compiles llama.cpp from a pinned release tag. If a

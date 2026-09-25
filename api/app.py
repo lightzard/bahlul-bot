@@ -635,14 +635,15 @@ async def _nsfw_command(update: Update, query: str) -> None:
         conversation.append({"role": "user", "content": query})
 
         # Output limit is injected per request only and never persisted to
-        # history, matching the DeepSeek flow.
-        messages = list(conversation)
-        messages.append(
+        # history, matching the DeepSeek flow. It goes first: the Qwen3.5
+        # chat template rejects system messages that are not at the beginning.
+        messages = [
             {
                 "role": "system",
                 "content": f"Your maximum output is {settings.NSFW_OUTPUT_LIMIT_CHARS} characters.",
-            }
-        )
+            },
+            *conversation,
+        ]
 
         answer = await text_backend.generate_text(
             messages,

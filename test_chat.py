@@ -1285,10 +1285,12 @@ def test_nsfw_handler_flow_locks_and_isolates_history():
 
     gen.assert_awaited_once()
     sent_messages = gen.await_args.args[0]
-    assert sent_messages[0] == {"role": "user", "content": "write a story"}
-    # The output-limit system message is injected per request, not persisted.
-    assert sent_messages[-1]["role"] == "system"
-    assert "4096" in sent_messages[-1]["content"]
+    # The output-limit system message is injected per request at the START
+    # (the Qwen3.5 template rejects trailing system messages), not persisted.
+    assert sent_messages[0]["role"] == "system"
+    assert "4096" in sent_messages[0]["content"]
+    assert sent_messages[1] == {"role": "user", "content": "write a story"}
+    assert sent_messages[-1]["role"] == "user"
     assert gen.await_args.kwargs["max_tokens"] == 1024
 
     # Placeholder edited with the answer, no extra plain replies.

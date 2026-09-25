@@ -8,9 +8,9 @@
 #
 # Build and push (both tags point at the same image; pin endpoints to the
 # versioned tag), then point a RunPod Serverless endpoint at the image:
-#   docker build -t <registry>/hauhaucs-text-runpod:v0.3 \
+#   docker build -t <registry>/hauhaucs-text-runpod:v0.4 \
 #                -t <registry>/hauhaucs-text-runpod:latest ./runpod-text
-#   docker push <registry>/hauhaucs-text-runpod:v0.3
+#   docker push <registry>/hauhaucs-text-runpod:v0.4
 #   docker push <registry>/hauhaucs-text-runpod:latest
 #
 # The GGUF weights are NOT baked into the image. They are downloaded once from
