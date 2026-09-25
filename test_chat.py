@@ -995,6 +995,9 @@ def test_draw_handler_replies_with_image_and_lock():
     assert kwargs["width"] > 0 and kwargs["height"] > 0 and kwargs["steps"] > 0
     update.message.reply_photo.assert_awaited_once()
     assert update.message.reply_photo.await_args.kwargs["photo"] == b"\x89PNG image bytes"
+    assert update.message.reply_photo.await_args.kwargs["has_spoiler"] is True, (
+        "generated images must be sent with a spoiler cover"
+    )
 
     # Lock must be acquired and released, and the request logged into history.
     lock_calls = [c for c in fake_redis.set_calls if c["key"] == "image_op_lock"]
@@ -1060,6 +1063,9 @@ def test_edit_handler_downloads_photo_and_edits():
     assert args[1] == "make it night"
     update.message.reply_photo.assert_awaited_once()
     assert update.message.reply_photo.await_args.kwargs["photo"] == b"\x89PNG edited bytes"
+    assert update.message.reply_photo.await_args.kwargs["has_spoiler"] is True, (
+        "edited images must be sent with a spoiler cover"
+    )
     assert "image_op_lock" not in fake_redis.store, "lock not released"
     print("✓ /edit downloads the photo, edits it, and replies with the result")
 
@@ -1171,6 +1177,214 @@ def test_edit_pattern_matches_edit_and_editlora():
     print("✓ edit caption pattern matches /edit, /editlora, /e, /el only")
 
 
+# ---------------------------------------------------------------------------
+# Uncensored text backend tests (mocked RunPod API + handlers, no network)
+# ---------------------------------------------------------------------------
+def _text_runpod_settings_patches(**overrides):
+    values = {
+        "RUNPOD_API_KEY": "test-runpod-key",
+        "RUNPOD_TEXT_ENDPOINT_ID": "test-text-endpoint",
+        "RUNPOD_API_BASE_URL": "https://api.runpod.ai",
+        "NSFW_POLL_INTERVAL_SECONDS": 0,
+        "NSFW_JOB_TIMEOUT_SECONDS": 30,
+    }
+    values.update(overrides)
+    return [patch(f"api.settings.{name}", value) for name, value in values.items()]
+
+
+def test_runpod_text_backend_success():
+    """Submit -> poll -> COMPLETED returns the generated text."""
+    from api import text_backend as tb
+    from api.text_backend import generate_text
+
+    session = _FakeAiohttpSession(
+        posts=[_FakeResponse(200, {"id": "job-t1", "status": "IN_QUEUE"})],
+        gets=[
+            _FakeResponse(200, {"id": "job-t1", "status": "IN_PROGRESS"}),
+            _FakeResponse(200, {"id": "job-t1", "status": "COMPLETED",
+                                "output": {"content": "Once upon a time..."}}),
+        ],
+    )
+
+    patches = _text_runpod_settings_patches()
+    patches.append(patch.object(tb.aiohttp, "ClientSession", return_value=session))
+    with _multi_patch(patches):
+        result = asyncio.run(
+            generate_text(
+                [{"role": "user", "content": "tell me a story"}],
+                max_tokens=512,
+                temperature=0.7,
+            )
+        )
+
+    assert result == "Once upon a time...", f"Unexpected text: {result!r}"
+    submit = session.post_calls[0]
+    assert submit["url"] == "https://api.runpod.ai/v2/test-text-endpoint/run", submit["url"]
+    job_input = submit["json"]["input"]
+    assert job_input["task"] == "generate"
+    assert job_input["messages"] == [{"role": "user", "content": "tell me a story"}]
+    assert job_input["max_tokens"] == 512
+    assert job_input["temperature"] == 0.7
+    assert session.get_calls[0]["url"].endswith("/status/job-t1")
+    print("✓ RunPod text backend submits, polls, and returns the reply text")
+
+
+def test_runpod_text_backend_requires_config():
+    """Missing RUNPOD_TEXT_ENDPOINT_ID produces a clear configuration error."""
+    from api.text_backend import TextBackendError, generate_text
+
+    with patch("api.settings.RUNPOD_API_KEY", "key"), \
+         patch("api.settings.RUNPOD_TEXT_ENDPOINT_ID", None):
+        try:
+            asyncio.run(generate_text([{"role": "user", "content": "hi"}]))
+            assert False, "Should have raised TextBackendError"
+        except TextBackendError as e:
+            assert "RUNPOD_TEXT_ENDPOINT_ID" in str(e), str(e)
+    print("✓ RunPod text backend reports missing configuration clearly")
+
+
+def test_dummy_text_backend():
+    """The dummy text backend echoes the last user message."""
+    from api.text_backend import DummyTextBackend
+
+    backend = DummyTextBackend()
+    messages = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "second"},
+    ]
+    result = asyncio.run(backend.generate_text(messages))
+    assert result == "[dummy-nsfw] second", f"Unexpected dummy output: {result!r}"
+    print("✓ dummy text backend echoes the last user message")
+
+
+def _make_nsfw_update(chat_id=111, user_id=222):
+    update = _make_telegram_update(chat_id=chat_id, user_id=user_id)
+    placeholder = MagicMock()
+    placeholder.edit_text = AsyncMock()
+    update.message.reply_text = AsyncMock(return_value=placeholder)
+    return update, placeholder
+
+
+def test_nsfw_handler_flow_locks_and_isolates_history():
+    """/nsfw acquires the lock, calls the backend, edits the placeholder, and
+    saves history under the nsfw: namespace (never chat:)."""
+    from api import app as app_module
+    from api.app import nsfw
+
+    fake_redis = FakeRedis()
+    update, placeholder = _make_nsfw_update()
+    context = MagicMock()
+    context.args = ["write", "a", "story"]
+
+    gen = AsyncMock(return_value="A tale of the high seas.")
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.WHITELIST_IDS", {"111"}), \
+         patch("api.text_backend.generate_text", gen):
+        asyncio.run(nsfw(update, context))
+
+    gen.assert_awaited_once()
+    sent_messages = gen.await_args.args[0]
+    assert sent_messages[0] == {"role": "user", "content": "write a story"}
+    # The output-limit system message is injected per request, not persisted.
+    assert sent_messages[-1]["role"] == "system"
+    assert "4096" in sent_messages[-1]["content"]
+    assert gen.await_args.kwargs["max_tokens"] == 1024
+
+    # Placeholder edited with the answer, no extra plain replies.
+    placeholder.edit_text.assert_awaited()
+    assert placeholder.edit_text.await_args.args[0] == "A tale of the high seas."
+
+    # Lock acquired with NX+TTL and released.
+    lock_calls = [c for c in fake_redis.set_calls if c["key"] == "nsfw_op_lock"]
+    assert lock_calls and lock_calls[0]["nx"] and lock_calls[0]["ex"], "lock not acquired with NX+TTL"
+    assert "nsfw_op_lock" not in fake_redis.store, "lock not released"
+
+    # History saved under the nsfw namespace only, without the system message.
+    assert "nsfw:111:main" in fake_redis.store, "history not saved under nsfw: namespace"
+    assert "chat:111:main" not in fake_redis.store, "nsfw leaked into the chat: namespace"
+    saved = json.loads(fake_redis.store["nsfw:111:main"])
+    assert saved == [
+        {"role": "user", "content": "write a story"},
+        {"role": "assistant", "content": "A tale of the high seas."},
+    ]
+    print("✓ /nsfw locks, calls the backend, and keeps history isolated")
+
+
+def test_nsfw_handler_busy_replies_and_skips_backend():
+    """While the lock is held, /nsfw replies busy and never calls the backend."""
+    from api import app as app_module
+    from api.app import nsfw
+
+    fake_redis = FakeRedis()
+    fake_redis.store["nsfw_op_lock"] = "1"
+    update, placeholder = _make_nsfw_update()
+    context = MagicMock()
+    context.args = ["again"]
+
+    gen = AsyncMock(return_value="unused")
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.WHITELIST_IDS", {"111"}), \
+         patch("api.text_backend.generate_text", gen):
+        asyncio.run(nsfw(update, context))
+
+    gen.assert_not_awaited()
+    placeholder.edit_text.assert_not_awaited()
+    busy_reply = update.message.reply_text.await_args.kwargs["text"]
+    assert "busy" in busy_reply.lower()
+    assert "nsfw_op_lock" in fake_redis.store, "we must not release a lock we do not own"
+    print("✓ /nsfw rejects overlapping requests while the lock is held")
+
+
+def test_nsfw_handler_splits_long_replies():
+    """Replies longer than the Telegram limit are split across messages."""
+    from api import settings
+    from api import app as app_module
+    from api.app import nsfw
+
+    fake_redis = FakeRedis()
+    update, placeholder = _make_nsfw_update()
+    context = MagicMock()
+    context.args = ["epic"]
+
+    long_answer = "".join(f"line {i}\n" for i in range(600))  # ~4.8k chars
+    gen = AsyncMock(return_value=long_answer)
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.WHITELIST_IDS", {"111"}), \
+         patch("api.text_backend.generate_text", gen):
+        asyncio.run(nsfw(update, context))
+
+    first_chunk = placeholder.edit_text.await_args.args[0]
+    assert len(first_chunk) <= settings.NSFW_OUTPUT_LIMIT_CHARS
+    # The overflow was sent as follow-up messages, each within the limit.
+    # (The warming-up placeholder also uses reply_text, with a positional
+    # text argument — filter to the chunk calls by their keyword.)
+    overflow_calls = [
+        c for c in update.message.reply_text.await_args_list if "text" in c.kwargs
+    ]
+    assert overflow_calls, "long reply was not split into follow-up messages"
+    for call in overflow_calls:
+        assert len(call.kwargs["text"]) <= settings.NSFW_OUTPUT_LIMIT_CHARS
+    rejoined = first_chunk + "".join(c.kwargs["text"] for c in overflow_calls)
+    assert len(rejoined) >= len(long_answer.replace("\n", "")) - len(overflow_calls) * 2
+    print("✓ /nsfw splits long replies into Telegram-sized chunks")
+
+
+def test_split_message_prefers_line_breaks():
+    """_split_message cuts at newlines when possible and returns short text as-is."""
+    from api.app import _split_message
+
+    assert _split_message("short", 4096) == ["short"]
+
+    text = "a" * 2000 + "\n" + "b" * 2000 + "\n" + "c" * 2000
+    chunks = _split_message(text, 4096)
+    assert len(chunks) == 2, f"Expected 2 chunks, got {len(chunks)}"
+    assert len(chunks[0]) == 4001  # cut at the last newline inside the window
+    assert not chunks[0].endswith("\n")
+    assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
+    print("✓ _split_message cuts at line breaks and preserves all content")
+
+
 def run_mocked_tests():
     """Run all mocked tests (no API keys or network required)."""
     print("=" * 60)
@@ -1210,6 +1424,13 @@ def run_mocked_tests():
     test_editlora_caption_routes_to_lora_stack()
     test_edit_pattern_matches_edit_and_editlora()
     test_runpod_backend_lora_task_mapping()
+    test_runpod_text_backend_success()
+    test_runpod_text_backend_requires_config()
+    test_dummy_text_backend()
+    test_nsfw_handler_flow_locks_and_isolates_history()
+    test_nsfw_handler_busy_replies_and_skips_backend()
+    test_nsfw_handler_splits_long_replies()
+    test_split_message_prefers_line_breaks()
     print("=" * 60)
     print("All mocked tests passed! ✓")
     print("=" * 60)

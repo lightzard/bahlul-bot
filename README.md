@@ -1,6 +1,6 @@
 # BahlulBot
 
-BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with FastAPI and hosted on Vercel. It responds to user messages and commands in private and group chats, leveraging the DeepSeek API (OpenAI-compatible) for intelligent responses. Image generation (`/draw`) and image editing (`/edit`) run on **Qwen Image 2.1** (GGUF) through an external RunPod Serverless GPU worker running ComfyUI. The bot supports conversation context, maintaining a history of interactions to provide coherent responses.
+BahlulBot is a Telegram bot powered by the DeepSeek API for chat, built with FastAPI and hosted on Vercel. It responds to user messages and commands in private and group chats, leveraging the DeepSeek API (OpenAI-compatible) for intelligent responses. Image generation (`/draw`) and image editing (`/edit`) run on **Qwen Image 2.1** (GGUF) through an external RunPod Serverless GPU worker running ComfyUI. Uncensored text generation (`/nsfw`) runs on **HauhauCS Qwen3.5-4B Uncensored** (GGUF) through a second RunPod Serverless worker running llama.cpp. The bot supports conversation context, maintaining a history of interactions to provide coherent responses.
 
 ## Architecture
 
@@ -11,13 +11,21 @@ Telegram -> FastAPI webhook (api/app.py on Vercel)
          -> ComfyUI + UnetLoaderGGUF
          -> Qwen Image 2.1 GGUF weights (cached from Hugging Face)
          -> image bytes back to Telegram
+
+         -> api/text_backend (provider abstraction)
+         -> RunPod Serverless endpoint (runpod-text/ in this repo)
+         -> llama.cpp llama-server
+         -> HauhauCS Qwen3.5-4B Uncensored GGUF (cached from Hugging Face)
+         -> reply text back to Telegram
 ```
 
 The Vercel app stays lightweight — it never executes the model. Hugging Face
-([KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF](https://huggingface.co/KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF))
-is only the storage/source for the weights; the worker downloads them once to
-a RunPod Network Volume. See [runpod/README.md](runpod/README.md) for the full
-GPU backend deployment guide.
+([KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF](https://huggingface.co/KasugaiSakura/Qwen-Image-2.1-Uncensored-Abenzerps-GGUF)
+and [HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive](https://huggingface.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive))
+is only the storage/source for the weights; each worker downloads them once to
+a shared RunPod Network Volume. See [runpod/README.md](runpod/README.md) and
+[runpod-text/README.md](runpod-text/README.md) for the full GPU backend
+deployment guides.
 
 ## Features
 
@@ -27,7 +35,8 @@ GPU backend deployment guide.
 - **Webhook-Based**: Uses FastAPI to handle Telegram webhook updates, optimized for Vercel’s serverless environment.
 - **DeepSeek API Integration**: Powered by the official DeepSeek API (default model: `deepseek-flash`) for generating chat responses.
 - **Live Web Search**: Selectively augments freshness-sensitive questions (news, weather, prices, latest versions, etc.) with Tavily search results, cached in Redis and capped by a per-user daily quota. Use `/web <question>` to force a live search.
-- **Image Generation & Editing (Qwen Image 2.1)**: `/draw <description>` and photo-captioned `/edit <description>` run the uncensored Qwen GGUF; `/drawlora <description>` and `/editlora <description>` run the base int8 checkpoint plus your LoRA. Shorthands: `/d`, `/dl`, `/e`, `/el`. All execute on a RunPod Serverless GPU worker (scale-to-zero) via the provider abstraction in `api/image_backend/`.
+- **Image Generation & Editing (Qwen Image 2.1)**: `/draw <description>` and photo-captioned `/edit <description>` run the uncensored Qwen GGUF; `/drawlora <description>` and `/editlora <description>` run the base int8 checkpoint plus your LoRA. Shorthands: `/d`, `/dl`, `/e`, `/el`. All execute on a RunPod Serverless GPU worker (scale-to-zero) via the provider abstraction in `api/image_backend/`. Results are sent with a **Telegram spoiler cover** (tap-to-reveal, `IMAGE_HAS_SPOILER`) so explicit images stay blurred in the chat.
+- **Uncensored Text (HauhauCS Qwen3.5-4B)**: `/nsfw <prompt>` (shorthand `/n`) generates uncensored, unfiltered replies on a separate RunPod Serverless worker running llama.cpp, via the abstraction in `api/text_backend.py`. History is kept separate from DeepSeek chats (Redis keys `nsfw:*`), and a first message after idle may take ~30s while the GPU worker cold-starts.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
 
 ## Requirements
@@ -45,9 +54,11 @@ GPU backend deployment guide.
 Secrets and access control are configured through environment variables; all other configuration lives in `api/settings.py`.
 - `TELEGRAM_TOKEN`: Your Telegram bot token from `@BotFather`.
 - `DEEPSEEK_API_KEY`: Your DeepSeek API key (see https://platform.deepseek.com for details).
-- `RUNPOD_API_KEY`: Your RunPod API key, required for `/draw` and `/edit` (see [runpod/README.md](runpod/README.md) to deploy the backend first).
+- `RUNPOD_API_KEY`: Your RunPod API key, required for `/draw`, `/edit`, and `/nsfw` (see [runpod/README.md](runpod/README.md) and [runpod-text/README.md](runpod-text/README.md) to deploy the backends first).
 - `RUNPOD_ENDPOINT_ID`: Your RunPod Serverless endpoint ID for the Qwen Image 2.1 worker.
+- `RUNPOD_TEXT_ENDPOINT_ID`: Your RunPod Serverless endpoint ID for the HauhauCS text worker (`/nsfw`).
 - `IMAGE_BACKEND`: Optional. `runpod` (default) or `dummy` (offline stub for tests).
+- `TEXT_BACKEND`: Optional. `runpod` (default) or `dummy` (offline stub for tests).
 - `TAVILY_API_KEY`: Your Tavily API key, required to enable live web search (see https://www.tavily.com). Optional—chat works without it, but automatic recency search is disabled.
 - `WHITELIST_IDS`: Comma-separated chat or user IDs allowed to use the bot (e.g., `123456789,987654321`). If unset or empty, nobody can use the bot.
 - `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash). This is a secret too, so it stays in the environment.
@@ -65,7 +76,8 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
 - `WEB_SEARCH_DAILY_LIMIT`: Maximum uncached live searches per user per UTC day (default: `50`).
 - `WEB_SEARCH_TIMEOUT_SECONDS`: Timeout for each Tavily request (default: `8`).
 - `WEB_SEARCH_CONTEXT_MAX_CHARS`: Cap for the search context injected into DeepSeek (default: `8000`).
-- Image settings (`/draw`, `/edit`): backend timeout/polling, the global image single-flight lock TTL, and default width/height/steps for Qwen Image 2.1 (25 steps, 1024×1024, matching the official ComfyUI templates).
+- Image settings (`/draw`, `/edit`): backend timeout/polling, the global image single-flight lock TTL, default width/height/steps for Qwen Image 2.1 (25 steps, 1024×1024, matching the official ComfyUI templates), and `IMAGE_HAS_SPOILER` (default `True`) — sends generated/edited photos with a Telegram spoiler cover.
+- Text settings (`/nsfw`): `NSFW_JOB_TIMEOUT_SECONDS` (default `280`, must stay below the Vercel `maxDuration`), `NSFW_POLL_INTERVAL_SECONDS`, `NSFW_OP_LOCK_TTL_SECONDS`, `NSFW_MAX_TOKENS` (default `1024`), `NSFW_TEMPERATURE` (default `0.7`, the model card's non-thinking preset), and `NSFW_OUTPUT_LIMIT_CHARS` (default `4096`).
 - `BOT_USERNAME`: Used to recognize commands such as `/edit@BahlulBot` (default: `BahlulBot`).
 
 ## Setup Instructions
@@ -96,6 +108,10 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
    - Follow [runpod/README.md](runpod/README.md): build and push the worker image, create a Network Volume and a Serverless endpoint (Active Workers 0, Max Workers 1, idle timeout 300–600 s), then note your endpoint ID and RunPod API key.
    - The weights (Qwen Image 2.1 GGUF + text encoder + VAE) are pulled once from the public Hugging Face repo to the volume — nothing is re-uploaded or re-downloaded per request.
 
+3b. **Deploy the Text Backend (RunPod, for /nsfw)**
+   - Follow [runpod-text/README.md](runpod-text/README.md): build and push the worker image, create a second Serverless endpoint (RTX 4090, Active Workers 0, Max Workers 1, idle timeout 300–600 s) attached to the **same** Network Volume (same data center as the image endpoint), then note the text endpoint ID.
+   - The HauhauCS Qwen3.5-4B GGUF (~2.7 GB) is pulled once to the shared volume; the existing 30 GB volume holds both stacks (~24 GB used).
+
 4. **Set Up a Redis Instance**
    - Sign up for a free Redis database at https://upstash.com/.
    - Create a new Redis database and copy the `REDIS_URL` (e.g., `rediss://:<token>@<host>:<port>`).
@@ -106,8 +122,9 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
    - Add the secrets (and optionally `WHITELIST_IDS`):
      - `TELEGRAM_TOKEN`: Your bot token from `@BotFather`.
      - `DEEPSEEK_API_KEY`: Your DeepSeek API key.
-     - `RUNPOD_API_KEY`: Your RunPod API key (required for `/draw` and `/edit`).
+     - `RUNPOD_API_KEY`: Your RunPod API key (required for `/draw`, `/edit`, and `/nsfw`).
      - `RUNPOD_ENDPOINT_ID`: Your RunPod Serverless endpoint ID.
+     - `RUNPOD_TEXT_ENDPOINT_ID`: Your RunPod Serverless endpoint ID for the HauhauCS text worker.
      - `REDIS_URL`: The Redis connection URL from Upstash.
      - `TAVILY_API_KEY`: (Optional) Your Tavily API key for live web search (https://www.tavily.com). Automatic recency search is disabled if omitted.
      - `WHITELIST_IDS`: (Optional) Comma-separated chat or user IDs allowed to use the bot. If unset, nobody can use it.
@@ -145,6 +162,8 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
      - Expected: an edited version of the photo.
      - Attach a photo captioned: `/editlora make it night`
      - Expected: the LoRA-stack edit.
+     - Send: `/nsfw write a story about a space smuggler` (or shorthand `/n`)
+     - Expected: an uncensored reply (first request after idle may take ~30s while the GPU worker cold-starts).
    - **Group Chat** (with privacy mode off and bot as admin):
      - Send: `/ask What is AI?`
      - Expected: “AI is…”
@@ -211,6 +230,7 @@ This performs a single basic search for `"latest AI news today"`, prints the top
   upstash redis get chat:<chat_id>:main
   ```
   - Expected: JSON like `[{"role": "user", "content": "What is the capital of France?"}, {"role": "assistant", "content": "The capital of France is Paris."}, ...]`.
+  - `/nsfw` history lives under a separate namespace: `upstash redis keys nsfw:*`.
 - Check Vercel logs:
   ```bash
   vercel logs <your-app>.vercel.app
@@ -265,6 +285,13 @@ This performs a single basic search for `"latest AI news today"`, prints the top
   - First request after idle can take several minutes (GPU cold start). Subsequent requests reuse the warm worker for the configured idle window (5–10 min).
   - If the worker is busy you will get an "I'm still busy with the previous image request" reply — retry shortly.
   - See [runpod/README.md](runpod/README.md) for GPU-worker-side troubleshooting (OOM, GGUF loader errors, first-boot downloads).
+
+- **NSFW Command Failing** (`/nsfw`, `/n`):
+  - Verify `RUNPOD_API_KEY` and `RUNPOD_TEXT_ENDPOINT_ID` are set in Vercel.
+  - Check logs for `Text backend error for /nsfw` / `RunPod job ... ended as FAILED`.
+  - Check the worker logs in the RunPod console (text endpoint → Logs) — the error string from llama-server is included in the bot's error reply.
+  - First request after idle can take ~30s (GPU cold start); a busy worker replies "I'm still busy with the previous /nsfw request" — retry shortly.
+  - See [runpod-text/README.md](runpod-text/README.md) for text-worker-side troubleshooting (stale llama.cpp builds, quant swaps, first-boot downloads).
 
 ## License
 

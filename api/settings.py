@@ -19,6 +19,9 @@ REDIS_URL = os.getenv("REDIS_URL")
 # RunPod Serverless (Qwen Image 2.1 GGUF execution backend)
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 RUNPOD_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
+# Second RunPod endpoint (llama.cpp + HauhauCS Qwen3.5-4B GGUF) for /nsfw;
+# reuses RUNPOD_API_KEY. See runpod-text/ in the repo root.
+RUNPOD_TEXT_ENDPOINT_ID = os.getenv("RUNPOD_TEXT_ENDPOINT_ID")
 
 # ---------------------------------------------------------------------------
 # Access control (environment variable)
@@ -59,6 +62,28 @@ QWEN_IMAGE_WIDTH = 1024
 QWEN_IMAGE_HEIGHT = 1024
 QWEN_IMAGE_STEPS = 25
 QWEN_EDIT_STEPS = 25
+# Send generated/edited images with a Telegram spoiler cover (tap-to-reveal)
+# so explicit results stay blurred until deliberately opened.
+IMAGE_HAS_SPOILER = True
+
+# ---------------------------------------------------------------------------
+# Uncensored text generation (/nsfw via HauhauCS Qwen3.5-4B on RunPod)
+# ---------------------------------------------------------------------------
+# Which provider api/text_backend uses: "runpod" (external GPU endpoint) or
+# "dummy" (offline stub for tests/development).
+TEXT_BACKEND = os.getenv("TEXT_BACKEND", "runpod")
+# Must stay below the Vercel function maxDuration (see vercel.json) so the
+# Telegram reply can still be sent when a job barely fits the budget.
+NSFW_JOB_TIMEOUT_SECONDS = 280
+NSFW_POLL_INTERVAL_SECONDS = 2
+# Single-flight lock for /nsfw. Like the image lock, it covers a RunPod cold
+# start so Telegram re-deliveries skip instead of queueing a second job on
+# the single-GPU worker.
+NSFW_OP_LOCK_TTL_SECONDS = 300
+# Generation defaults; the worker clamps them server-side too.
+NSFW_MAX_TOKENS = 1024
+NSFW_TEMPERATURE = 0.7
+NSFW_OUTPUT_LIMIT_CHARS = 4096
 
 # ---------------------------------------------------------------------------
 # Bot

@@ -18,8 +18,9 @@ from telegram.ext import (
     filters,
 )
 
-from api import image_backend, settings
+from api import image_backend, settings, text_backend
 from api.image_backend import ImageBackendError
+from api.text_backend import TextBackendError
 from api.web_search import format_search_context, needs_web_search, search_web
 
 app = FastAPI()
@@ -47,8 +48,10 @@ def _query_from_args(context: ContextTypes.DEFAULT_TYPE) -> str | None:
     return " ".join(context.args) if context.args else None
 
 
-def _conversation_key(chat_id: int, message_thread_id: int | None) -> str:
-    return f"chat:{chat_id}:{message_thread_id or 'main'}"
+def _conversation_key(
+    chat_id: int, message_thread_id: int | None, namespace: str = "chat"
+) -> str:
+    return f"{namespace}:{chat_id}:{message_thread_id or 'main'}"
 
 
 async def _reply(update: Update, text: str | None = None, photo=None) -> None:
@@ -58,11 +61,32 @@ async def _reply(update: Update, text: str | None = None, photo=None) -> None:
     if photo is None:
         await update.message.reply_text(text=text, **params)
     else:
-        await update.message.reply_photo(photo=photo, **params)
+        await update.message.reply_photo(
+            photo=photo, has_spoiler=settings.IMAGE_HAS_SPOILER, **params
+        )
 
 
 def is_whitelisted(chat_id: int, user_id: int) -> bool:
     return str(chat_id) in settings.WHITELIST_IDS or str(user_id) in settings.WHITELIST_IDS
+
+
+def _split_message(text: str, limit: int) -> list[str]:
+    """Split long output into Telegram-sized chunks, preferring line breaks."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        window = remaining[:limit]
+        cut = window.rfind("\n")
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    return chunks
 
 
 async def require_whitelist(update: Update) -> bool:
@@ -190,7 +214,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Hello! I'm BahlulBot, powered by DeepSeek. Use /ask <your question> to get a "
             "response, /web <your question> to force a live web search, /draw <description> "
             "or /drawlora <description> to generate an image, or caption a photo with "
-            "/edit or /editlora <description> to edit it. Shorthands: /a, /d, /dl, /e, /el. "
+            "/edit or /editlora <description> to edit it. /nsfw <prompt> gives uncensored, "
+            "unfiltered replies. Shorthands: /a, /d, /dl, /e, /el, /n. "
             "You can also send a message in private chat."
         ),
     )
@@ -516,6 +541,136 @@ async def edit_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Uncensored text generation (HauhauCS Qwen3.5-4B via api/text_backend)
+# ---------------------------------------------------------------------------
+NSFW_OP_LOCK_KEY = "nsfw_op_lock"
+
+
+async def _acquire_nsfw_op_lock(redis_client, update: Update) -> bool:
+    """Single-flight lock for /nsfw, mirroring the image lock.
+
+    The text endpoint runs Max Workers 1, so overlapping requests (including
+    Telegram re-deliveries while a job is running) are rejected instead of
+    queued. Returns True when the request may proceed; replies to the user
+    and returns False otherwise.
+    """
+    if redis_client is None:
+        logger.warning("Redis is not available, proceeding without /nsfw lock")
+        return True
+    acquired = await redis_client.set(
+        NSFW_OP_LOCK_KEY, "1", nx=True, ex=settings.NSFW_OP_LOCK_TTL_SECONDS
+    )
+    if not acquired:
+        logger.info("Another /nsfw request is in progress, skipping this request")
+        await _reply(
+            update,
+            text=(
+                "I'm still busy with the previous /nsfw request "
+                "(a cold start can take half a minute) — please try again shortly."
+            ),
+        )
+        return False
+    return True
+
+
+async def _edit_or_reply(placeholder, update: Update, text: str, params: dict) -> None:
+    """Replace the warming-up placeholder, falling back to a fresh reply if
+    the placeholder was deleted."""
+    if placeholder is not None:
+        try:
+            await placeholder.edit_text(text=text, **params)
+            return
+        except Exception:
+            logger.warning("Could not edit the /nsfw placeholder, sending a new message")
+    await _reply(update, text=text)
+
+
+async def nsfw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/nsfw - uncensored generation via the HauhauCS text backend."""
+    if update.message is None:
+        return
+    logger.info(
+        "Received /nsfw command from chat ID: %s, thread ID: %s, query: %s",
+        update.message.chat.id,
+        update.message.message_thread_id,
+        _query_from_args(context),
+    )
+    if not await require_whitelist(update):
+        return
+    query = _query_from_args(context)
+    if not query:
+        await _reply(
+            update,
+            text="Please provide a prompt after /nsfw (e.g., /nsfw write a story about a space smuggler)",
+        )
+        return
+    await _nsfw_command(update, query)
+
+
+async def _nsfw_command(update: Update, query: str) -> None:
+    """Handle /nsfw with its own Redis history, isolated from DeepSeek chats."""
+    params = {}
+    if update.message.message_thread_id:
+        params["message_thread_id"] = update.message.message_thread_id
+
+    redis_client = None
+    lock_acquired = False
+    placeholder = None
+    try:
+        redis_client = await init_redis()
+        lock_acquired = await _acquire_nsfw_op_lock(redis_client, update)
+        if not lock_acquired:
+            return
+        placeholder = await update.message.reply_text(
+            "Generating… (a cold GPU start can take about 30 seconds)",
+            **params,
+        )
+
+        # Separate namespace so uncensored chats never mix into the DeepSeek
+        # history that /ask and free-text messages use.
+        conversation_key = _conversation_key(
+            update.message.chat.id, update.message.message_thread_id, namespace="nsfw"
+        )
+        conversation = await get_conversation_history(redis_client, conversation_key)
+        conversation.append({"role": "user", "content": query})
+
+        # Output limit is injected per request only and never persisted to
+        # history, matching the DeepSeek flow.
+        messages = list(conversation)
+        messages.append(
+            {
+                "role": "system",
+                "content": f"Your maximum output is {settings.NSFW_OUTPUT_LIMIT_CHARS} characters.",
+            }
+        )
+
+        answer = await text_backend.generate_text(
+            messages,
+            max_tokens=settings.NSFW_MAX_TOKENS,
+            temperature=settings.NSFW_TEMPERATURE,
+        )
+
+        conversation.append({"role": "assistant", "content": answer})
+        await save_conversation_history(redis_client, conversation_key, conversation)
+
+        chunks = _split_message(answer, settings.NSFW_OUTPUT_LIMIT_CHARS)
+        await placeholder.edit_text(chunks[0], **params)
+        for chunk in chunks[1:]:
+            await update.message.reply_text(text=chunk, **params)
+    except TextBackendError as e:
+        logger.error("Text backend error for /nsfw: %s", e)
+        await _edit_or_reply(placeholder, update, f"Error generating a response: {e}", params)
+    except Exception as e:
+        logger.error("Error processing /nsfw command: %s", e)
+        await _edit_or_reply(placeholder, update, f"Error generating a response: {e}", params)
+    finally:
+        if redis_client is not None:
+            if lock_acquired:
+                await redis_client.delete(NSFW_OP_LOCK_KEY)
+            await _close_redis(redis_client)
+
+
+# ---------------------------------------------------------------------------
 # Bot initialization and webhook
 # ---------------------------------------------------------------------------
 async def initialize_bot():
@@ -531,6 +686,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler("web", web))
     telegram_app.add_handler(CommandHandler(["draw", "d"], draw))
     telegram_app.add_handler(CommandHandler(["drawlora", "dl"], drawlora))
+    telegram_app.add_handler(CommandHandler(["nsfw", "n"], nsfw))
     telegram_app.add_handler(
         MessageHandler(
             filters.PHOTO
