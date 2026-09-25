@@ -602,6 +602,18 @@ class FakeRedis:
         self.ttls = {}
         self.set_calls = []
         self.expire_calls = []
+        self.lists = {}
+        self.ltrim_calls = []
+
+    async def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+
+    async def ltrim(self, key, start, end):
+        self.ltrim_calls.append({"key": key, "start": start, "end": end})
+        self.lists[key] = self.lists.get(key, [])[start : end + 1]
+
+    async def lrange(self, key, start, end):
+        return self.lists.get(key, [])[start : end + 1]
 
     async def get(self, key):
         return self.store.get(key)
@@ -1387,6 +1399,107 @@ def test_split_message_prefers_line_breaks():
     print("✓ _split_message cuts at line breaks and preserves all content")
 
 
+# ---------------------------------------------------------------------------
+# Audit trail tests (mocked Redis, no network required)
+# ---------------------------------------------------------------------------
+def _sample_update_json(text="/n hello there", user_id=777, username="nightowl", chat_id=-100999):
+    return {
+        "update_id": 1,
+        "message": {
+            "message_id": 42,
+            "from": {"id": user_id, "username": username, "first_name": "Night", "last_name": "Owl"},
+            "chat": {"id": chat_id, "type": "group", "title": "The Group"},
+            "text": text,
+        },
+    }
+
+
+def test_audit_records_update():
+    """Every update writes a sender record to the audit list, trimmed to the cap."""
+    from api import settings
+    from api.app import _record_audit
+
+    fake_redis = FakeRedis()
+    asyncio.run(_record_audit(fake_redis, _sample_update_json()))
+
+    entries = fake_redis.lists.get("audit:log", [])
+    assert len(entries) == 1, f"expected one audit entry, got {len(entries)}"
+    record = json.loads(entries[0])
+    assert record["user_id"] == 777
+    assert record["username"] == "nightowl"
+    assert record["name"] == "Night Owl"
+    assert record["chat_id"] == -100999
+    assert record["chat_title"] == "The Group"
+    assert record["text"] == "/n hello there"
+    assert record["ts"]
+
+    # The list must be trimmed to the configured cap on every write.
+    assert fake_redis.ltrim_calls == [
+        {"key": "audit:log", "start": 0, "end": settings.AUDIT_LOG_MAX_ENTRIES - 1}
+    ], fake_redis.ltrim_calls
+
+    # Long text is truncated to the snippet cap.
+    fake_redis2 = FakeRedis()
+    asyncio.run(
+        _record_audit(fake_redis2, _sample_update_json(text="x" * (settings.AUDIT_SNIPPET_CHARS + 50)))
+    )
+    stored = json.loads(fake_redis2.lists["audit:log"][0])
+    assert len(stored["text"]) == settings.AUDIT_SNIPPET_CHARS
+    print("✓ audit records sender, chat, and truncated text into the capped Redis list")
+
+
+def test_audit_never_raises_on_broken_redis():
+    """Audit failures must not break update processing."""
+    from api.app import _record_audit
+
+    class BoomRedis:
+        async def lpush(self, *a, **k):
+            raise ConnectionError("boom")
+
+        async def ltrim(self, *a, **k):
+            raise ConnectionError("boom")
+
+    asyncio.run(_record_audit(BoomRedis(), _sample_update_json()))  # must not raise
+    print("✓ audit recorder swallows Redis failures")
+
+
+def test_audit_command_owner_only():
+    """/audit shows records to the owner and refuses everyone else."""
+    from api import app as app_module
+    from api.app import audit
+
+    fake_redis = FakeRedis()
+    asyncio.run(app_module._record_audit(fake_redis, _sample_update_json()))
+
+    # Owner sees the record.
+    owner_update = _make_telegram_update()
+    owner_update.message.from_user.id = 999
+    context = MagicMock()
+    context.args = []
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.OWNER_IDS", {"999"}):
+        asyncio.run(audit(owner_update, context))
+    reply = owner_update.message.reply_text.await_args.kwargs["text"]
+    assert "@nightowl" in reply and "id 777" in reply and "/n hello there" in reply, reply
+
+    # Non-owner is refused and never touches Redis.
+    stranger_update = _make_telegram_update()
+    stranger_update.message.from_user.id = 111
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.OWNER_IDS", {"999"}):
+        asyncio.run(audit(stranger_update, context))
+    denied = stranger_update.message.reply_text.await_args.kwargs["text"]
+    assert "restricted" in denied.lower(), denied
+
+    # Unset OWNER_IDS disables the command entirely.
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.settings.OWNER_IDS", set()):
+        asyncio.run(audit(owner_update, context))
+    disabled = owner_update.message.reply_text.await_args.kwargs["text"]
+    assert "not configured" in disabled.lower(), disabled
+    print("✓ /audit is owner-gated and renders the audit records")
+
+
 def run_mocked_tests():
     """Run all mocked tests (no API keys or network required)."""
     print("=" * 60)
@@ -1433,6 +1546,9 @@ def run_mocked_tests():
     test_nsfw_handler_busy_replies_and_skips_backend()
     test_nsfw_handler_splits_long_replies()
     test_split_message_prefers_line_breaks()
+    test_audit_records_update()
+    test_audit_never_raises_on_broken_redis()
+    test_audit_command_owner_only()
     print("=" * 60)
     print("All mocked tests passed! ✓")
     print("=" * 60)

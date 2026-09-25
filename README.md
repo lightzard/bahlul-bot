@@ -60,7 +60,8 @@ Secrets and access control are configured through environment variables; all oth
 - `IMAGE_BACKEND`: Optional. `runpod` (default) or `dummy` (offline stub for tests).
 - `TEXT_BACKEND`: Optional. `runpod` (default) or `dummy` (offline stub for tests).
 - `TAVILY_API_KEY`: Your Tavily API key, required to enable live web search (see https://www.tavily.com). Optional—chat works without it, but automatic recency search is disabled.
-- `WHITELIST_IDS`: Comma-separated chat or user IDs allowed to use the bot (e.g., `123456789,987654321`). If unset or empty, nobody can use the bot.
+- `WHITELIST_IDS`: Comma-separated chat or user IDs allowed to use the bot (e.g., `123456789,987654321`). If unset or empty, nobody can use the bot. Note: a whitelisted **group** chat lets *every member* query the bot, and a whitelisted **user** ID works from any chat they use.
+- `OWNER_IDS`: Optional. Comma-separated user IDs allowed to use `/audit` (the bot owner). If unset, `/audit` is disabled for everyone.
 - `REDIS_URL`: The connection URL for your Redis instance (e.g., `rediss://:<token>@<host>:<port>` from Upstash). This is a secret too, so it stays in the environment.
 
 ### Configuration (`api/settings.py`)
@@ -79,6 +80,7 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
 - Image settings (`/draw`, `/edit`): backend timeout/polling, the global image single-flight lock TTL, default width/height/steps for Qwen Image 2.1 (25 steps, 1024×1024, matching the official ComfyUI templates), and `IMAGE_HAS_SPOILER` (default `True`) — sends generated/edited photos with a Telegram spoiler cover.
 - Text settings (`/nsfw`): `NSFW_JOB_TIMEOUT_SECONDS` (default `280`, must stay below the Vercel `maxDuration`), `NSFW_POLL_INTERVAL_SECONDS`, `NSFW_OP_LOCK_TTL_SECONDS`, `NSFW_MAX_TOKENS` (default `1024`), `NSFW_TEMPERATURE` (default `0.7`, the model card's non-thinking preset), and `NSFW_OUTPUT_LIMIT_CHARS` (default `4096`).
 - `BOT_USERNAME`: Used to recognize commands such as `/edit@BahlulBot` (default: `BahlulBot`).
+- Audit trail: every received update (sender id/username/name, chat, first `AUDIT_SNIPPET_CHARS` characters of text) is appended to the Redis list `audit:log`, trimmed to `AUDIT_LOG_MAX_ENTRIES` (default `500`). Use `/audit [n]` (owner-only, `OWNER_IDS`) or `upstash redis lrange audit:log 0 20` to see who queried the bot — Vercel's log retention is too short for after-the-fact checks.
 
 ## Setup Instructions
 

@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import aiohttp
@@ -672,6 +673,91 @@ async def _nsfw_command(update: Update, query: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Audit trail (who queried the bot; Redis outlives Vercel's short log retention)
+# ---------------------------------------------------------------------------
+AUDIT_LOG_KEY = "audit:log"
+
+
+async def _record_audit(redis_client, update_json: dict) -> None:
+    """Append one record per received update. Never raises — audit failures
+    must not break update processing."""
+    if redis_client is None:
+        return
+    try:
+        message = update_json.get("message") or update_json.get("edited_message") or {}
+        sender = message.get("from") or {}
+        chat = message.get("chat") or {}
+        text = message.get("text") or message.get("caption") or ""
+        record = {
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"),
+            "user_id": sender.get("id"),
+            "username": sender.get("username"),
+            "name": " ".join(
+                part for part in (sender.get("first_name"), sender.get("last_name")) if part
+            ),
+            "chat_id": chat.get("id"),
+            "chat_type": chat.get("type"),
+            "chat_title": chat.get("title") or chat.get("username"),
+            "text": text[: settings.AUDIT_SNIPPET_CHARS],
+        }
+        await redis_client.lpush(AUDIT_LOG_KEY, json.dumps(record))
+        await redis_client.ltrim(AUDIT_LOG_KEY, 0, settings.AUDIT_LOG_MAX_ENTRIES - 1)
+    except Exception as e:
+        logger.error("Failed to write audit record: %s", e)
+
+
+async def audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/audit [n] - show the last n updates seen by the bot (owner only)."""
+    if update.message is None:
+        return
+    logger.info("Received /audit command from user ID: %s", update.message.from_user.id)
+    if not settings.OWNER_IDS:
+        await _reply(update, text="/audit is not configured. Set OWNER_IDS to enable it.")
+        return
+    if str(update.message.from_user.id) not in settings.OWNER_IDS:
+        logger.warning("Unauthorized /audit attempt by user %s", update.message.from_user.id)
+        await _reply(update, text="Sorry, /audit is restricted to the bot owner.")
+        return
+
+    count = 10
+    if context.args:
+        try:
+            count = max(1, min(50, int(context.args[0])))
+        except ValueError:
+            pass
+
+    redis_client = None
+    try:
+        redis_client = await init_redis()
+        if redis_client is None:
+            await _reply(update, text="Redis is not available — the audit log is empty.")
+            return
+        records = await redis_client.lrange(AUDIT_LOG_KEY, 0, count - 1)
+        if not records:
+            await _reply(update, text="No audit records yet.")
+            return
+        lines = []
+        for raw in records:
+            try:
+                r = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            who = f"@{r['username']}" if r.get("username") else (r.get("name") or "?")
+            lines.append(
+                f"{r.get('ts', '?')} | {who} (id {r.get('user_id', '?')}) | "
+                f"chat {r.get('chat_id', '?')} ({r.get('chat_type', '?')}"
+                f"{', ' + r['chat_title'] if r.get('chat_title') else ''}) | {r.get('text', '')}"
+            )
+        await _reply(update, text="\n".join(lines))
+    except Exception as e:
+        logger.error("Error reading audit log: %s", e)
+        await _reply(update, text=f"Error reading the audit log: {e}")
+    finally:
+        if redis_client:
+            await _close_redis(redis_client)
+
+
+# ---------------------------------------------------------------------------
 # Bot initialization and webhook
 # ---------------------------------------------------------------------------
 async def initialize_bot():
@@ -688,6 +774,7 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler(["draw", "d"], draw))
     telegram_app.add_handler(CommandHandler(["drawlora", "dl"], drawlora))
     telegram_app.add_handler(CommandHandler(["nsfw", "n"], nsfw))
+    telegram_app.add_handler(CommandHandler("audit", audit))
     telegram_app.add_handler(
         MessageHandler(
             filters.PHOTO
@@ -710,6 +797,15 @@ async def telegram_webhook(request: Request):
         update_json = await request.json()
         logger.info("Received update: %s", update_json)
         update = Update.de_json(update_json, telegram_app.bot)
+
+        # Persist who queried the bot before dispatching: Vercel log retention
+        # is too short to answer "who used it last night" after the fact.
+        audit_redis = await init_redis()
+        try:
+            await _record_audit(audit_redis, update_json)
+        finally:
+            if audit_redis is not None:
+                await _close_redis(audit_redis)
 
         await telegram_app.process_update(update)
         logger.info("Update processed successfully")

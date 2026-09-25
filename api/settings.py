@@ -31,6 +31,11 @@ RUNPOD_TEXT_ENDPOINT_ID = os.getenv("RUNPOD_TEXT_ENDPOINT_ID")
 WHITELIST_IDS = {
     id.strip() for id in os.getenv("WHITELIST_IDS", "").split(",") if id.strip()
 }
+# Comma-separated user IDs allowed to use /audit (the bot owner(s)). Empty
+# (or unset) leaves /audit disabled for everyone.
+OWNER_IDS = {
+    id.strip() for id in os.getenv("OWNER_IDS", "").split(",") if id.strip()
+}
 
 # ---------------------------------------------------------------------------
 # Chat (DeepSeek)
@@ -89,6 +94,18 @@ NSFW_OUTPUT_LIMIT_CHARS = 4096
 # Bot
 # ---------------------------------------------------------------------------
 BOT_USERNAME = "BahlulBot"
+
+# ---------------------------------------------------------------------------
+# Audit trail (Redis)
+# ---------------------------------------------------------------------------
+# One record per received Telegram update (sender, chat, text snippet), kept
+# in the Redis list "audit:log" and trimmed to the newest N entries. Vercel
+# log retention is too short to answer "who used the bot last night" after
+# the fact; Redis persists across deploys.
+AUDIT_LOG_MAX_ENTRIES = 500
+# Enough of the text to recognize the query without archiving full NSFW
+# prompts in Redis.
+AUDIT_SNIPPET_CHARS = 80
 
 # ---------------------------------------------------------------------------
 # Live web search (Tavily)
