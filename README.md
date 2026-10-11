@@ -17,6 +17,10 @@ Telegram -> FastAPI webhook (api/app.py on Vercel)
          -> llama.cpp llama-server
          -> HauhauCS Qwen3.5-4B Uncensored GGUF (cached from Hugging Face)
          -> reply text back to Telegram
+
+         -> api/knowledge.py (shared .MD knowledge base, optional)
+         -> RunPod S3-compatible Network Volume (kb/*.md, canonical store)
+         <- Obsidian vault on your PC, synced via scripts/kb-sync.* (rclone)
 ```
 
 The Vercel app stays lightweight — it never executes the model. Hugging Face
@@ -37,6 +41,7 @@ deployment guides.
 - **Live Web Search**: Selectively augments freshness-sensitive questions (news, weather, prices, latest versions, etc.) with Tavily search results, cached in Redis and capped by a per-user daily quota. Use `/web <question>` to force a live search.
 - **Image Generation & Editing (Qwen Image 2.1)**: `/draw <description>` and photo-captioned `/edit <description>` run the uncensored Qwen GGUF; `/drawlora <description>` and `/editlora <description>` run the base int8 checkpoint plus your LoRA. Shorthands: `/d`, `/dl`, `/e`, `/el`. All execute on a RunPod Serverless GPU worker (scale-to-zero) via the provider abstraction in `api/image_backend/`. Results are sent with a **Telegram spoiler cover** (tap-to-reveal, `IMAGE_HAS_SPOILER`) so explicit images stay blurred in the chat.
 - **Uncensored Text (HauhauCS Qwen3.5-4B)**: `/nsfw <prompt>` (shorthand `/n`) generates uncensored, unfiltered replies on a separate RunPod Serverless worker running llama.cpp, via the abstraction in `api/text_backend.py`. History is kept separate from DeepSeek chats (Redis keys `nsfw:*`), and a first message after idle may take ~30s while the GPU worker cold-starts.
+- **Shared Knowledge Base (optional)**: one Markdown file per subject (`Carl.md`, `Johnson.md`) on your RunPod S3-compatible Network Volume — the same files are an Obsidian vault on your PC (`scripts/kb-sync.*`). `/ask` and `/nsfw` automatically ground replies in matching entries (mention "Carl" → `Carl.md` is injected), and the agent can accumulate new facts during any chat: it ends replies with hidden `[[KB:Carl]] … [[/KB]]` blocks that get appended to the entry's `## Log` section, or you use `/remember Carl <fact>`. `/kb [name]` lists/shows entries. Storage stays on your own infrastructure; nothing goes through third-party content review.
 - **Group Chat Support**: Handles group messages and topic threads (supergroups) when properly configured.
 
 ## Requirements
@@ -59,6 +64,7 @@ Secrets and access control are configured through environment variables; all oth
 - `RUNPOD_TEXT_ENDPOINT_ID`: Your RunPod Serverless endpoint ID for the HauhauCS text worker (`/nsfw`).
 - `IMAGE_BACKEND`: Optional. `runpod` (default) or `dummy` (offline stub for tests).
 - `TEXT_BACKEND`: Optional. `runpod` (default) or `dummy` (offline stub for tests).
+- `KNOWLEDGE_S3_ENDPOINT`, `KNOWLEDGE_BUCKET`, `KNOWLEDGE_ACCESS_KEY_ID`, `KNOWLEDGE_SECRET_ACCESS_KEY`: Optional. Your RunPod S3-compatible Network Volume credentials enabling the shared knowledge base (`/kb`, `/remember`, automatic grounding). All four unset = the feature is off. See [scripts/rclone-setup.md](scripts/rclone-setup.md).
 - `TAVILY_API_KEY`: Your Tavily API key, required to enable live web search (see https://www.tavily.com). Optional—chat works without it, but automatic recency search is disabled.
 - `WHITELIST_IDS`: Comma-separated chat or user IDs allowed to use the bot (e.g., `123456789,987654321`). If unset or empty, nobody can use the bot. Note: a whitelisted **group** chat lets *every member* query the bot, and a whitelisted **user** ID works from any chat they use.
 - `OWNER_IDS`: Optional. Comma-separated user IDs allowed to use `/audit` (the bot owner). If unset, `/audit` is disabled for everyone.
@@ -79,6 +85,7 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
 - `WEB_SEARCH_CONTEXT_MAX_CHARS`: Cap for the search context injected into DeepSeek (default: `8000`).
 - Image settings (`/draw`, `/edit`): backend timeout/polling, the global image single-flight lock TTL, default width/height/steps for Qwen Image 2.1 (25 steps, 1024×1024, matching the official ComfyUI templates), and `IMAGE_HAS_SPOILER` (default `True`) — sends generated/edited photos with a Telegram spoiler cover.
 - Text settings (`/nsfw`): `NSFW_JOB_TIMEOUT_SECONDS` (default `280`, must stay below the Vercel `maxDuration`), `NSFW_POLL_INTERVAL_SECONDS`, `NSFW_OP_LOCK_TTL_SECONDS`, `NSFW_MAX_TOKENS` (default `1024`), `NSFW_TEMPERATURE` (default `0.7`, the model card's non-thinking preset), and `NSFW_OUTPUT_LIMIT_CHARS` (default `4096`).
+- Knowledge base settings: `KNOWLEDGE_CACHE_TTL_SECONDS` (`300`), `KNOWLEDGE_CONTEXT_MAX_CHARS` (`6000` for /ask), `NSFW_KNOWLEDGE_CONTEXT_MAX_CHARS` (`3000` for /nsfw), `KNOWLEDGE_MAX_ENTRIES_INJECTED` (`3`), and `KB_MAX_BULLETS_PER_REPLY` (`5`).
 - `BOT_USERNAME`: Used to recognize commands such as `/edit@BahlulBot` (default: `BahlulBot`).
 - Audit trail: every received update (sender id/username/name, chat, first `AUDIT_SNIPPET_CHARS` characters of text) is appended to the Redis list `audit:log`, trimmed to `AUDIT_LOG_MAX_ENTRIES` (default `500`). Use `/audit [n]` (owner-only, `OWNER_IDS`) or `upstash redis lrange audit:log 0 20` to see who queried the bot — Vercel's log retention is too short for after-the-fact checks.
 
@@ -113,6 +120,11 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
 3b. **Deploy the Text Backend (RunPod, for /nsfw)**
    - Follow [runpod-text/README.md](runpod-text/README.md): build and push the worker image, create a second Serverless endpoint (RTX 4090, Active Workers 0, Max Workers 1, idle timeout 300–600 s) attached to the **same** Network Volume (same data center as the image endpoint), then note the text endpoint ID.
    - The HauhauCS Qwen3.5-4B GGUF (~2.7 GB) is pulled once to the shared volume; the existing 30 GB volume holds both stacks (~24 GB used).
+
+3c. **Enable the Shared Knowledge Base (optional)**
+   - In the RunPod console, enable the S3-compatible endpoint on your Network Volume and create access keys (see [scripts/rclone-setup.md](scripts/rclone-setup.md)).
+   - Set the four `KNOWLEDGE_*` env vars on Vercel and redeploy; without them the feature is fully off.
+   - Locally: `mkdir knowledge`, open that folder as an Obsidian vault, and sync with `scripts/kb-sync.ps1` (or `.sh`) using the same credentials. `python test_chat.py --live-kb` verifies connectivity from your PC.
 
 4. **Set Up a Redis Instance**
    - Sign up for a free Redis database at https://upstash.com/.
@@ -166,6 +178,8 @@ Non-secret configuration is centralized in [api/settings.py](api/settings.py):
      - Expected: the LoRA-stack edit.
      - Send: `/nsfw write a story about a space smuggler` (or shorthand `/n`)
      - Expected: an uncensored reply (first request after idle may take ~30s while the GPU worker cold-starts).
+     - Send: `/remember Carl loves spicy ramen` (knowledge base configured)
+     - Expected: "Noted for Carl." — after your next kb-pull, `Carl.md` has a `## Log` line. Send `/kb Carl` to read it back, and mention Carl in any chat to ground replies in his entry.
    - **Group Chat** (with privacy mode off and bot as admin):
      - Send: `/ask What is AI?`
      - Expected: “AI is…”
@@ -294,6 +308,13 @@ This performs a single basic search for `"latest AI news today"`, prints the top
   - Check the worker logs in the RunPod console (text endpoint → Logs) — the error string from llama-server is included in the bot's error reply.
   - First request after idle can take ~30s (GPU cold start); a busy worker replies "I'm still busy with the previous /nsfw request" — retry shortly.
   - See [runpod-text/README.md](runpod-text/README.md) for text-worker-side troubleshooting (stale llama.cpp builds, quant swaps, first-boot downloads).
+
+- **Knowledge Base Issues** (`/kb`, `/remember`, grounding):
+  - `The knowledge base is not configured` → one or more of the four `KNOWLEDGE_*` env vars are missing on Vercel.
+  - `Error reading/updating the knowledge base` → check Vercel logs for the underlying S3 error; `python test_chat.py --live-kb` verifies connectivity and credentials from your PC.
+  - Entries the bot just wrote don't appear locally → run `kb-sync pull`; entries you just pushed aren't used yet → bot caches expire within `KNOWLEDGE_CACHE_TTL_SECONDS` (default 5 min).
+  - Chat replies never contain `[[KB:...]]` markers — they are stripped before you see them; check the Vercel log for `Knowledge entry ... updated`.
+  - Sync conflicts are last-writer-wins per file; the bot only appends under `## Log` — `pull` before `push`.
 
 ## License
 

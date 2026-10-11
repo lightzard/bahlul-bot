@@ -22,6 +22,13 @@ RUNPOD_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
 # Second RunPod endpoint (llama.cpp + HauhauCS Qwen3.5-4B GGUF) for /nsfw;
 # reuses RUNPOD_API_KEY. See runpod-text/ in the repo root.
 RUNPOD_TEXT_ENDPOINT_ID = os.getenv("RUNPOD_TEXT_ENDPOINT_ID")
+# Shared Markdown knowledge base on a RunPod S3-compatible Network Volume
+# (see api/knowledge.py and scripts/kb-sync.*). All four unset/empty = the
+# whole feature is off and the bot behaves as if it does not exist.
+KNOWLEDGE_S3_ENDPOINT = os.getenv("KNOWLEDGE_S3_ENDPOINT")
+KNOWLEDGE_BUCKET = os.getenv("KNOWLEDGE_BUCKET")
+KNOWLEDGE_ACCESS_KEY_ID = os.getenv("KNOWLEDGE_ACCESS_KEY_ID")
+KNOWLEDGE_SECRET_ACCESS_KEY = os.getenv("KNOWLEDGE_SECRET_ACCESS_KEY")
 
 # ---------------------------------------------------------------------------
 # Access control (environment variable)
@@ -89,6 +96,16 @@ NSFW_OP_LOCK_TTL_SECONDS = 300
 NSFW_MAX_TOKENS = 1024
 NSFW_TEMPERATURE = 0.7
 NSFW_OUTPUT_LIMIT_CHARS = 4096
+
+# ---------------------------------------------------------------------------
+# Shared knowledge base (/ask + /nsfw grounding, [[KB:...]] capture)
+# ---------------------------------------------------------------------------
+KNOWLEDGE_CACHE_TTL_SECONDS = 300
+# Injected context budget per command; /n's 4B model has a tighter window.
+KNOWLEDGE_CONTEXT_MAX_CHARS = 6000
+NSFW_KNOWLEDGE_CONTEXT_MAX_CHARS = 3000
+KNOWLEDGE_MAX_ENTRIES_INJECTED = 3
+KB_MAX_BULLETS_PER_REPLY = 5
 
 # ---------------------------------------------------------------------------
 # Bot

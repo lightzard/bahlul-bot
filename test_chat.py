@@ -181,6 +181,37 @@ async def live_tavily_test():
         return False
 
 
+async def live_kb_test():
+    """Real integration test against the knowledge base S3 endpoint.
+
+    Requires the KNOWLEDGE_* env vars (endpoint, bucket, keys). Read-only:
+    lists entries and fetches the first one.
+
+    Run with:
+        python test_chat.py --live-kb
+    """
+    from api import knowledge
+
+    if not knowledge.is_configured():
+        print(
+            "Skipping live KB test: set KNOWLEDGE_S3_ENDPOINT, KNOWLEDGE_BUCKET, "
+            "KNOWLEDGE_ACCESS_KEY_ID, and KNOWLEDGE_SECRET_ACCESS_KEY to run it"
+        )
+        return False
+
+    try:
+        entries = await knowledge.list_entries(None)
+        print(f"✓ Live KB listing succeeded ({len(entries)} entries)")
+        if entries:
+            print(f"  Entries: {', '.join(entries)}")
+            content = await knowledge.get_entry(None, entries[0])
+            print(f"  First entry {entries[0]!r}: {len(content or '')} chars")
+        return True
+    except Exception as e:
+        print(f"✗ Live KB test failed: {e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Web search integration tests (mocked, no network or API keys required)
 # ---------------------------------------------------------------------------
@@ -1500,6 +1531,268 @@ def test_audit_command_owner_only():
     print("✓ /audit is owner-gated and renders the audit records")
 
 
+# ---------------------------------------------------------------------------
+# Knowledge base tests (mocked S3 + Redis, no network required)
+# ---------------------------------------------------------------------------
+_KB_ENV = {
+    "KNOWLEDGE_S3_ENDPOINT": "https://s3.example.runpod.io",
+    "KNOWLEDGE_BUCKET": "test-bucket",
+    "KNOWLEDGE_ACCESS_KEY_ID": "key",
+    "KNOWLEDGE_SECRET_ACCESS_KEY": "secret",
+}
+
+
+def _kb_settings_patches(**overrides):
+    values = dict(_KB_ENV)
+    values.update(
+        {
+            "KNOWLEDGE_CACHE_TTL_SECONDS": 300,
+            "KNOWLEDGE_CONTEXT_MAX_CHARS": 6000,
+            "NSFW_KNOWLEDGE_CONTEXT_MAX_CHARS": 3000,
+            "KNOWLEDGE_MAX_ENTRIES_INJECTED": 3,
+            "KB_MAX_BULLETS_PER_REPLY": 5,
+        }
+    )
+    values.update(overrides)
+    return [patch(f"api.settings.{name}", value) for name, value in values.items()]
+
+
+class _FakeS3:
+    """Minimal boto3 client double backed by a dict of file contents."""
+
+    def __init__(self, files=None):
+        self.files = dict(files or {})
+        self.puts = []
+
+    class _Exceptions:
+        NoSuchKey = type("NoSuchKey", (Exception,), {})
+
+    @property
+    def exceptions(self):
+        return self._Exceptions
+
+    def list_objects_v2(self, Bucket, Prefix):
+        return {
+            "Contents": [
+                {"Key": f"{Prefix}{name}.md"} for name in sorted(self.files)
+            ]
+        }
+
+    def get_object(self, Bucket, Key):
+        name = Key.split("/", 1)[1][: -len(".md")]
+        if name not in self.files:
+            raise self.exceptions.NoSuchKey("not found")
+        body = self.files[name].encode("utf-8")
+        return {"Body": type("Body", (), {"read": lambda self, _b=body: _b})()}
+
+    def put_object(self, Bucket, Key, Body, ContentType=None):
+        name = Key.split("/", 1)[1][: -len(".md")]
+        self.files[name] = Body.decode("utf-8")
+        self.puts.append({"name": name, "content": self.files[name]})
+
+
+def test_kb_parse_blocks():
+    """Marker blocks are stripped from the reply and captured as bullets."""
+    from api.knowledge import parse_kb_blocks
+
+    reply = (
+        "Carl loves spicy ramen.\n\n"
+        "[[KB:Carl]]\n"
+        "- loves spicy ramen\n"
+        "- hates mornings\n"
+        "[[/KB]]"
+    )
+    clean, updates = parse_kb_blocks(reply)
+    assert clean == "Carl loves spicy ramen.", repr(clean)
+    assert updates == {"Carl": ["loves spicy ramen", "hates mornings"]}, updates
+
+    # No blocks -> reply unchanged.
+    clean2, updates2 = parse_kb_blocks("just a normal reply")
+    assert clean2 == "just a normal reply" and updates2 == {}
+
+    # Unclosed marker is removed from the visible text.
+    clean3, _ = parse_kb_blocks("text\n[[KB:Carl]]\n- orphan fact")
+    assert "[[KB:" not in clean3 and "text" in clean3
+    print("✓ KB marker parsing strips blocks and captures bullets")
+
+
+def test_kb_append_to_log():
+    """append_to_log adds dated bullets under ## Log, dedupes, and creates files."""
+    from api.knowledge import append_to_log
+
+    # Existing file with sections.
+    content = "# Carl\n\n## Facts\n- curly hair\n\n## Log\n- 2026-01-01: old fact\n"
+    updated = append_to_log(content, ["loves spicy ramen", "OLD FACT", "another"], "Carl")
+    assert "- 2026-01-01: old fact" in updated
+    assert "loves spicy ramen" in updated
+    assert updated.count("Old fact") + updated.count("old fact") == 1, "dedupe failed"
+    assert "another" in updated
+    assert updated.index("## Facts") < updated.index("## Log")
+    assert updated.index("old fact") < updated.index("loves spicy ramen")
+
+    # Missing file -> full skeleton.
+    created = append_to_log(None, ["first fact"], "Johnson")
+    assert created.startswith("# Johnson")
+    assert "## Facts" in created and "first fact" in created
+    assert created.index("## Facts") < created.index("## Log")
+
+    # Missing ## Log section -> appended before EOF, Facts untouched.
+    no_log = "# Carl\n\n## Facts\n- curly hair\n"
+    updated2 = append_to_log(no_log, ["new"], "Carl")
+    assert "## Log" in updated2 and "- curly hair" in updated2
+    assert updated2.index("curly hair") < updated2.index("## Log")
+    print("✓ append_to_log appends, dedupes, and creates the skeleton")
+
+
+def test_kb_select_entries():
+    """Whole-word name matching only; substring names do not match."""
+    from api.knowledge import select_entries
+
+    names = ["Carl", "Johnson", "Carlton"]
+    assert select_entries("what does carl like?", names) == ["Carl"]
+    assert select_entries("Tell me about CARLTON and Johnson", names) == ["Johnson", "Carlton"]
+    assert select_entries("nothing relevant here", names) == []
+    print("✓ KB entry selection matches whole words case-insensitively")
+
+
+def test_kb_format_context():
+    """The context block contains index, entries, marker instructions, and caps."""
+    from api import settings
+    from api.knowledge import format_knowledge_context
+
+    ctx = format_knowledge_context(
+        ["Carl", "Johnson"], {"Carl": "# Carl\n\n## Facts\n- curly hair"}, 6000
+    )
+    assert "Carl, Johnson" in ctx
+    assert "[Carl.md]" in ctx
+    assert "curly hair" in ctx
+    assert "[[KB:Carl]]" in ctx and "[[/KB]]" in ctx
+    assert str(settings.KB_MAX_BULLETS_PER_REPLY) in ctx
+    assert len(ctx) <= 6000
+    print("✓ KB context formatting includes index, contents, and instructions")
+
+
+def test_kb_cache_hit_avoids_s3():
+    """Cached entries are served from Redis without touching S3."""
+    from api import knowledge
+
+    class BoomS3:
+        def __getattr__(self, item):
+            raise AssertionError("S3 must not be called on cache hit")
+
+    fake_redis = FakeRedis()
+    fake_redis.store["kb:file:carl"] = json.dumps("# Carl\n")
+    fake_redis.store["kb:index"] = json.dumps(["Carl"])
+
+    with _multi_patch(
+        _kb_settings_patches() + [patch.object(knowledge, "_get_s3", lambda: BoomS3())]
+    ):
+        assert asyncio.run(knowledge.list_entries(fake_redis)) == ["Carl"]
+        assert asyncio.run(knowledge.get_entry(fake_redis, "Carl")) == "# Carl\n"
+    print("✓ KB Redis cache hits avoid S3 round trips")
+
+
+def test_kb_apply_updates():
+    """apply_kb_updates reads, appends, writes, and invalidates caches."""
+    from api import knowledge
+
+    s3 = _FakeS3({"Carl": "# Carl\n\n## Facts\n- curly hair\n\n## Log\n"})
+    fake_redis = FakeRedis()
+    fake_redis.store["kb:file:carl"] = json.dumps("stale")
+
+    with _multi_patch(
+        _kb_settings_patches() + [patch.object(knowledge, "_get_s3", lambda: s3)]
+    ):
+        applied = asyncio.run(knowledge.apply_kb_updates(fake_redis, {"Carl": ["loves ramen"]}))
+
+    assert applied == 1
+    assert len(s3.puts) == 1 and "loves ramen" in s3.puts[0]["content"]
+    assert "curly hair" in s3.puts[0]["content"], "existing content must be preserved"
+    # Caches invalidated so the next read is fresh.
+    assert "kb:file:carl" not in fake_redis.store
+    assert "kb:index" not in fake_redis.store
+
+    # New entries are created from the skeleton.
+    with _multi_patch(
+        _kb_settings_patches() + [patch.object(knowledge, "_get_s3", lambda: s3)]
+    ):
+        asyncio.run(knowledge.apply_kb_updates(fake_redis, {"Johnson": ["hates mornings"]}))
+    assert "# Johnson" in s3.files["Johnson"] and "hates mornings" in s3.files["Johnson"]
+    print("✓ apply_kb_updates merges into entries and invalidates caches")
+
+
+def test_kb_unconfigured_is_inert():
+    """Without env vars, build_knowledge_context returns None and commands say so."""
+    from api import knowledge
+
+    with patch("api.settings.KNOWLEDGE_S3_ENDPOINT", None):
+        assert knowledge.is_configured() is False
+        assert asyncio.run(knowledge.build_knowledge_context(FakeRedis(), "hi", 100)) is None
+    print("✓ KB feature is inert when unconfigured")
+
+
+def test_remember_handler_updates_kb():
+    """/remember appends a fact and confirms."""
+    from api import app as app_module
+    from api.app import remember
+
+    update = _make_telegram_update(text="/remember Carl loves ramen")
+    context = MagicMock()
+    context.args = ["Carl", "loves", "ramen"]
+
+    apply_updates = AsyncMock(return_value=1)
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=FakeRedis())), \
+         patch("api.settings.WHITELIST_IDS", {"111"}), \
+         patch("api.knowledge.is_configured", lambda: True), \
+         patch("api.knowledge.apply_kb_updates", apply_updates):
+        asyncio.run(remember(update, context))
+
+    apply_updates.assert_awaited_once()
+    assert apply_updates.await_args.args[1] == {"Carl": ["loves ramen"]}
+    reply = update.message.reply_text.await_args.kwargs["text"]
+    assert "Noted for Carl" in reply
+    print("✓ /remember appends the fact and confirms")
+
+
+def test_process_chat_query_kb_flow():
+    """/ask injects KB context, strips markers from reply and history, applies updates."""
+    from api import app as app_module
+
+    fake_redis = FakeRedis()
+    update = _make_telegram_update(text="what does Carl like?")
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = (
+        "Carl loves spicy ramen.\n\n[[KB:Carl]]\n- loves spicy ramen\n[[/KB]]"
+    )
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+    apply_updates = AsyncMock(return_value=1)
+    with patch.object(app_module, "init_redis", AsyncMock(return_value=fake_redis)), \
+         patch("api.app.AsyncOpenAI", lambda **kw: mock_client), \
+         patch("api.settings.TAVILY_API_KEY", None), \
+         patch("api.knowledge.is_configured", lambda: True), \
+         patch("api.knowledge.build_knowledge_context", AsyncMock(return_value="KB CONTEXT")), \
+         patch("api.knowledge.apply_kb_updates", apply_updates):
+        asyncio.run(app_module.process_chat_query(update, "what does Carl like?"))
+
+    # KB context reached DeepSeek.
+    messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+    assert any(m.get("content") == "KB CONTEXT" for m in messages), messages
+
+    # The reply and the saved history contain no marker blocks.
+    reply = update.message.reply_text.await_args.kwargs["text"]
+    assert reply == "Carl loves spicy ramen.", repr(reply)
+    saved = json.loads(fake_redis.store["chat:111:main"])
+    assert saved[-1]["content"] == "Carl loves spicy ramen."
+
+    # The captured bullet was applied to the knowledge base.
+    apply_updates.assert_awaited_once()
+    assert apply_updates.await_args.args[1] == {"Carl": ["loves spicy ramen"]}
+    print("✓ /ask injects KB context and captures markers end to end")
+
+
 def run_mocked_tests():
     """Run all mocked tests (no API keys or network required)."""
     print("=" * 60)
@@ -1549,13 +1842,28 @@ def run_mocked_tests():
     test_audit_records_update()
     test_audit_never_raises_on_broken_redis()
     test_audit_command_owner_only()
+    test_kb_parse_blocks()
+    test_kb_append_to_log()
+    test_kb_select_entries()
+    test_kb_format_context()
+    test_kb_cache_hit_avoids_s3()
+    test_kb_apply_updates()
+    test_kb_unconfigured_is_inert()
+    test_remember_handler_updates_kb()
+    test_process_chat_query_kb_flow()
     print("=" * 60)
     print("All mocked tests passed! ✓")
     print("=" * 60)
 
 
 if __name__ == "__main__":
-    if "--live-tavily" in sys.argv:
+    if "--live-kb" in sys.argv:
+        print("=" * 60)
+        print("Running live integration test against the knowledge base")
+        print("=" * 60)
+        success = asyncio.run(live_kb_test())
+        sys.exit(0 if success else 1)
+    elif "--live-tavily" in sys.argv:
         print("=" * 60)
         print("Running live integration test against Tavily API")
         print("=" * 60)

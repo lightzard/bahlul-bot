@@ -5,3 +5,4 @@ uvicorn
 redis
 aiohttp
 openai
+boto3

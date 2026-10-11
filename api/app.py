@@ -19,7 +19,7 @@ from telegram.ext import (
     filters,
 )
 
-from api import image_backend, settings, text_backend
+from api import image_backend, knowledge, settings, text_backend
 from api.image_backend import ImageBackendError
 from api.text_backend import TextBackendError
 from api.web_search import format_search_context, needs_web_search, search_web
@@ -104,7 +104,11 @@ async def require_whitelist(update: Update) -> bool:
 # ---------------------------------------------------------------------------
 # DeepSeek chat
 # ---------------------------------------------------------------------------
-async def get_deepseek_response(conversation: list, web_context: str | None = None) -> str:
+async def get_deepseek_response(
+    conversation: list,
+    web_context: str | None = None,
+    kb_context: str | None = None,
+) -> str:
     if not settings.DEEPSEEK_API_KEY:
         raise ValueError("DEEPSEEK_API_KEY is not set")
     client = AsyncOpenAI(api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL)
@@ -119,14 +123,17 @@ async def get_deepseek_response(conversation: list, web_context: str | None = No
         else:
             messages.append({"role": msg["role"], "content": msg["content"]})
 
-    # Output limit and live search evidence are injected per request only and
-    # never persisted to history, so stale grounding is never reused.
+    # Output limit, live search evidence, and knowledge base grounding are
+    # injected per request only and never persisted to history, so stale
+    # grounding is never reused.
     messages.append(
         {
             "role": "system",
             "content": f"Your maximum output is {settings.CHAT_OUTPUT_LIMIT_CHARS} characters.",
         }
     )
+    if kb_context:
+        messages.append({"role": "system", "content": kb_context})
     if web_context:
         messages.append({"role": "system", "content": web_context})
 
@@ -187,11 +194,22 @@ async def process_chat_query(
                 )
                 logger.warning("Web search failed, will disclose limitation: %s", outcome.error)
 
-        deepseek_response = await get_deepseek_response(conversation, web_context=web_context)
+        kb_context = await knowledge.build_knowledge_context(
+            redis_client, query, settings.KNOWLEDGE_CONTEXT_MAX_CHARS
+        )
+
+        deepseek_response = await get_deepseek_response(
+            conversation, web_context=web_context, kb_context=kb_context
+        )
+        # [[KB:...]] blocks are captured as knowledge updates and never shown.
+        deepseek_response, kb_updates = knowledge.parse_kb_blocks(deepseek_response)
 
         # Save only the user query and assistant answer; grounding stays ephemeral.
         conversation.append({"role": "assistant", "content": deepseek_response})
         await save_conversation_history(redis_client, conversation_key, conversation)
+
+        if kb_updates:
+            await knowledge.apply_kb_updates(redis_client, kb_updates)
 
         await _reply(update, text=deepseek_response)
     except Exception as e:
@@ -216,7 +234,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "response, /web <your question> to force a live web search, /draw <description> "
             "or /drawlora <description> to generate an image, or caption a photo with "
             "/edit or /editlora <description> to edit it. /nsfw <prompt> gives uncensored, "
-            "unfiltered replies. Shorthands: /a, /d, /dl, /e, /el, /n. "
+            "unfiltered replies. /kb [name] shows the shared knowledge base, and "
+            "/remember <name> <fact> stores a fact for all future chats. "
+            "Shorthands: /a, /d, /dl, /e, /el, /n. "
             "You can also send a message in private chat."
         ),
     )
@@ -636,24 +656,34 @@ async def _nsfw_command(update: Update, query: str) -> None:
         conversation.append({"role": "user", "content": query})
 
         # Output limit is injected per request only and never persisted to
-        # history, matching the DeepSeek flow. It goes first: the Qwen3.5
-        # chat template rejects system messages that are not at the beginning.
+        # history, matching the DeepSeek flow. System messages go first: the
+        # Qwen3.5 chat template rejects them anywhere else.
         messages = [
             {
                 "role": "system",
                 "content": f"Your maximum output is {settings.NSFW_OUTPUT_LIMIT_CHARS} characters.",
-            },
-            *conversation,
+            }
         ]
+        kb_context = await knowledge.build_knowledge_context(
+            redis_client, query, settings.NSFW_KNOWLEDGE_CONTEXT_MAX_CHARS
+        )
+        if kb_context:
+            messages.append({"role": "system", "content": kb_context})
+        messages.extend(conversation)
 
         answer = await text_backend.generate_text(
             messages,
             max_tokens=settings.NSFW_MAX_TOKENS,
             temperature=settings.NSFW_TEMPERATURE,
         )
+        # [[KB:...]] blocks are captured as knowledge updates and never shown.
+        answer, kb_updates = knowledge.parse_kb_blocks(answer)
 
         conversation.append({"role": "assistant", "content": answer})
         await save_conversation_history(redis_client, conversation_key, conversation)
+
+        if kb_updates:
+            await knowledge.apply_kb_updates(redis_client, kb_updates)
 
         chunks = _split_message(answer, settings.NSFW_OUTPUT_LIMIT_CHARS)
         await placeholder.edit_text(chunks[0], **params)
@@ -669,6 +699,92 @@ async def _nsfw_command(update: Update, query: str) -> None:
         if redis_client is not None:
             if lock_acquired:
                 await redis_client.delete(NSFW_OP_LOCK_KEY)
+            await _close_redis(redis_client)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base commands (/kb, /remember)
+# ---------------------------------------------------------------------------
+async def kb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/kb [name] - list knowledge entries or show one entry."""
+    if update.message is None:
+        return
+    if not await require_whitelist(update):
+        return
+    if not knowledge.is_configured():
+        await _reply(
+            update,
+            text="The knowledge base is not configured (KNOWLEDGE_* env vars are unset).",
+        )
+        return
+
+    name = _query_from_args(context)
+    redis_client = None
+    try:
+        redis_client = await init_redis()
+        if not name:
+            names = await knowledge.list_entries(redis_client)
+            if names:
+                await _reply(update, text="Knowledge base entries:\n" + "\n".join(names))
+            else:
+                await _reply(
+                    update,
+                    text="The knowledge base is empty. Add files via kb-push or "
+                    "teach me with /remember <name> <fact>.",
+                )
+            return
+        content = await knowledge.get_entry(redis_client, name)
+        if content is None:
+            known = await knowledge.list_entries(redis_client)
+            hint = f" Known entries: {', '.join(known)}" if known else ""
+            await _reply(update, text=f"No entry named '{name}'.{hint}")
+            return
+        if len(content) > 3800:
+            content = content[:3800] + "\n…[truncated — read the full file in your vault]"
+        await _reply(update, text=content)
+    except Exception as e:
+        logger.error("Error reading knowledge entry: %s", e)
+        await _reply(update, text=f"Error reading the knowledge base: {e}")
+    finally:
+        if redis_client:
+            await _close_redis(redis_client)
+
+
+async def remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/remember <name> <fact> - append a fact to an entry's ## Log section."""
+    if update.message is None:
+        return
+    if not await require_whitelist(update):
+        return
+    if not knowledge.is_configured():
+        await _reply(
+            update,
+            text="The knowledge base is not configured (KNOWLEDGE_* env vars are unset).",
+        )
+        return
+    args = context.args or []
+    if len(args) < 2:
+        await _reply(
+            update,
+            text="Please provide a name and a fact (e.g., /remember Carl loves spicy ramen)",
+        )
+        return
+    name = args[0]
+    fact = " ".join(args[1:])
+
+    redis_client = None
+    try:
+        redis_client = await init_redis()
+        applied = await knowledge.apply_kb_updates(redis_client, {name: [fact]})
+        if applied:
+            await _reply(update, text=f"Noted for {name}.")
+        else:
+            await _reply(update, text=f"Could not update '{name}' — check the logs.")
+    except Exception as e:
+        logger.error("Error updating knowledge entry: %s", e)
+        await _reply(update, text=f"Error updating the knowledge base: {e}")
+    finally:
+        if redis_client:
             await _close_redis(redis_client)
 
 
@@ -774,6 +890,8 @@ async def initialize_bot():
     telegram_app.add_handler(CommandHandler(["draw", "d"], draw))
     telegram_app.add_handler(CommandHandler(["drawlora", "dl"], drawlora))
     telegram_app.add_handler(CommandHandler(["nsfw", "n"], nsfw))
+    telegram_app.add_handler(CommandHandler("kb", kb))
+    telegram_app.add_handler(CommandHandler("remember", remember))
     telegram_app.add_handler(CommandHandler("audit", audit))
     telegram_app.add_handler(
         MessageHandler(
