@@ -21,10 +21,13 @@ foreach ($name in "KNOWLEDGE_S3_ENDPOINT", "KNOWLEDGE_BUCKET", "KNOWLEDGE_ACCESS
     }
 }
 
-# One-time remote setup (idempotent).
+# One-time remote setup (idempotent). The region is the datacenter from the
+# endpoint URL (https://s3api-<datacenter>.runpod.io) — RunPod signs against it.
+$region = if ($env:KNOWLEDGE_S3_ENDPOINT -match "s3api-([a-z0-9-]+)\.runpod\.io") { $Matches[1] } else { "us-east-1" }
 rclone config create runpodkb s3 `
     provider Other `
     endpoint $env:KNOWLEDGE_S3_ENDPOINT `
+    region $region `
     access_key_id $env:KNOWLEDGE_ACCESS_KEY_ID `
     secret_access_key $env:KNOWLEDGE_SECRET_ACCESS_KEY | Out-Null
 

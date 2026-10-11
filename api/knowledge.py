@@ -65,6 +65,14 @@ def _get_s3():
         import boto3
         from botocore.config import Config
 
+        # RunPod signs requests against the datacenter, which is embedded in
+        # the endpoint URL (https://s3api-<datacenter>.runpod.io).
+        region = "us-east-1"
+        match = re.search(
+            r"s3api-([a-z0-9-]+)\.runpod\.io", settings.KNOWLEDGE_S3_ENDPOINT, re.IGNORECASE
+        )
+        if match:
+            region = match.group(1).lower()
         _s3_client = boto3.client(
             "s3",
             endpoint_url=settings.KNOWLEDGE_S3_ENDPOINT,
@@ -72,7 +80,7 @@ def _get_s3():
             aws_secret_access_key=settings.KNOWLEDGE_SECRET_ACCESS_KEY,
             # Signature v4 is what MinIO/CEPH-based endpoints (RunPod) expect.
             config=Config(signature_version="s3v4"),
-            region_name="us-east-1",
+            region_name=region,
         )
     return _s3_client
 

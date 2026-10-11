@@ -6,11 +6,19 @@ Network Volume. Locally, the same files are an Obsidian vault in
 
 ## 1. Get the S3 details from RunPod
 
-RunPod Console → **Storage → Network Volume** → your volume → the S3
--compatible endpoint section. Note the **endpoint URL** (form
-`https://s3api-<region>.runpod.io` or similar), the **bucket name**, and
-create an **access key + secret** scoped to the volume. These are the same
-values the bot uses as env vars:
+1. **Endpoint:** RunPod Console → Storage → Network Volume → your volume.
+   The S3 endpoint is `https://s3api-<DATACENTER>.runpod.io` where
+   `<DATACENTER>` is where your volume lives (shown on the volume page; it
+   must be one of the S3-enabled datacenters, e.g. US-CA-2, EU-CZ-1).
+2. **Bucket:** the **Network Volume ID** itself (the volume's ID string on
+   the same page) — paths are `s3://<volume-id>/kb/...`.
+3. **Keys:** Console → **Settings → Credentials**
+   (https://console.runpod.io/user/credentials) → **S3 API Keys** tab →
+   **Create an S3 API key**. Save the **access key** (`user_...`) and the
+   **secret** (`rps_...`) — the secret is shown only once. This key is
+   separate from your regular RunPod API key.
+
+These map to the bot's env vars:
 
 ```
 KNOWLEDGE_S3_ENDPOINT=https://...
